@@ -1,6 +1,7 @@
 [general]
 name=FeatureNavEd
 qgisMinimumVersion=3.22
+qgisMaximumVersion=4.99
 description=Navigate and edit vector layer features one by one with attribute display, sorting, and auto-zoom. Dockable panel with previous/next navigation.
 about=FeatureNavEd is a dockable panel that lets you navigate and edit features of a vector layer one by one, similar to the Identify tool but with full navigation and editing control.
     <br><br>
