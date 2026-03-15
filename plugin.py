@@ -7,7 +7,7 @@ Registers the dock widget and creates toolbar/menu entries.
 
 import os
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QDockWidget
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsApplication
 
@@ -54,20 +54,26 @@ class FeatureNavEdPlugin:
             self.iface.addDockWidget(_RightDockArea, self.dock_widget)
             self.dock_widget.visibilityChanged.connect(self._on_visibility_changed)
 
-            # Resize to fill full height of the dock area on first open
+            # Tabify with existing right-side docks so it takes full height
             main_window = self.iface.mainWindow()
-            self.dock_widget.resize(
-                self.dock_widget.width(),
-                main_window.height()
-            )
-            try:
-                main_window.resizeDocks(
-                    [self.dock_widget],
-                    [main_window.height()],
-                    _Vertical
-                )
-            except AttributeError:
-                pass
+            right_docks = [
+                d for d in main_window.findChildren(QDockWidget)
+                if main_window.dockWidgetArea(d) == _RightDockArea
+                and d is not self.dock_widget
+                and d.isVisible()
+            ]
+            if right_docks:
+                main_window.tabifyDockWidget(right_docks[0], self.dock_widget)
+                self.dock_widget.raise_()
+            else:
+                try:
+                    main_window.resizeDocks(
+                        [self.dock_widget],
+                        [main_window.height()],
+                        _Vertical
+                    )
+                except AttributeError:
+                    pass
 
         self.dock_widget.setVisible(checked)
 
