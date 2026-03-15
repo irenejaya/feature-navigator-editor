@@ -11,6 +11,10 @@ from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsApplication
 
+# Qt5/Qt6 enum compatibility
+_RightDockArea = getattr(Qt, 'RightDockWidgetArea', None) or Qt.DockWidgetArea.RightDockWidgetArea
+_Vertical = getattr(Qt, 'Vertical', None) or Qt.Orientation.Vertical
+
 
 class FeatureNavEdPlugin:
     """Main plugin class for FeatureNavEd."""
@@ -47,7 +51,7 @@ class FeatureNavEdPlugin:
         if self.dock_widget is None:
             from .navigator_widget import FeatureNavEdDockWidget
             self.dock_widget = FeatureNavEdDockWidget(self.iface)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
+            self.iface.addDockWidget(_RightDockArea, self.dock_widget)
             self.dock_widget.visibilityChanged.connect(self._on_visibility_changed)
 
             # Resize to fill full height of the dock area on first open
@@ -60,7 +64,7 @@ class FeatureNavEdPlugin:
                 main_window.resizeDocks(
                     [self.dock_widget],
                     [main_window.height()],
-                    Qt.Vertical
+                    _Vertical
                 )
             except AttributeError:
                 pass
