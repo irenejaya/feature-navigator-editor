@@ -7,7 +7,10 @@ Uses QgsAttributeForm to render the native QGIS attribute form widget
 embedded directly in the panel — no OK/Cancel dialog buttons.
 """
 
-import xml.etree.ElementTree as ET
+try:
+    from defusedxml.ElementTree import fromstring as _xml_fromstring
+except ImportError:
+    from xml.etree.ElementTree import fromstring as _xml_fromstring
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
@@ -16,11 +19,32 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox, QSpinBox, QToolButton, QDialogButtonBox
 )
 
+# Qt5/Qt6 enum compatibility
+_AlignCenter = getattr(Qt, 'AlignCenter', None) or Qt.AlignmentFlag.AlignCenter
+_AllDockAreas = (
+    getattr(Qt, 'LeftDockWidgetArea', None)
+    or Qt.DockWidgetArea.LeftDockWidgetArea
+) | (
+    getattr(Qt, 'RightDockWidgetArea', None)
+    or Qt.DockWidgetArea.RightDockWidgetArea
+) | (
+    getattr(Qt, 'TopDockWidgetArea', None)
+    or Qt.DockWidgetArea.TopDockWidgetArea
+) | (
+    getattr(Qt, 'BottomDockWidgetArea', None)
+    or Qt.DockWidgetArea.BottomDockWidgetArea
+)
+
 from qgis.core import (
-    QgsApplication, QgsProject, QgsMapLayerProxyModel,
-    QgsVectorLayer, QgsCoordinateTransform, NULL
+    Qgis, QgsApplication, QgsProject, QgsMapLayerProxyModel,
+    QgsVectorLayer, QgsCoordinateTransform
 )
 from qgis.gui import QgsMapLayerComboBox
+
+try:
+    from qgis.core import NULL
+except ImportError:
+    NULL = None
 
 
 class _DropWidget(QWidget):
@@ -63,10 +87,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.sort_ascending = True
         self._feature_form = None
 
-        self.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-            | Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea
-        )
+        self.setAllowedAreas(_AllDockAreas)
         self.setObjectName("FeatureNavEdDockWidget")
         self.setAcceptDrops(True)
 
@@ -102,7 +123,7 @@ class FeatureNavEdDockWidget(QDockWidget):
             return None
         data = bytes(mime_data.data('application/qgis.layertreemodeldata'))
         try:
-            root = ET.fromstring(data.decode('utf-8'))
+            root = _xml_fromstring(data.decode('utf-8'))
             for elem in root.iter():
                 layer_id = elem.get('id')
                 if layer_id:
@@ -131,12 +152,18 @@ class FeatureNavEdDockWidget(QDockWidget):
 
         layer_row = QHBoxLayout()
         self.layer_combo = QgsMapLayerComboBox()
-        self.layer_combo.setFilters(QgsMapLayerProxyModel.VectorLayer)
+        try:
+            self.layer_combo.setFilters(Qgis.LayerFilter.VectorLayer)
+        except AttributeError:
+            self.layer_combo.setFilters(QgsMapLayerProxyModel.VectorLayer)
         self.layer_combo.setAllowEmptyLayer(True)
         self.layer_combo.setCurrentIndex(0)  # start with empty (no layer)
         self.layer_combo.setShowCrs(True)
         self.layer_combo.setMinimumContentsLength(10)
-        self.layer_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        try:
+            self.layer_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        except AttributeError:
+            self.layer_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         layer_row.addWidget(self.layer_combo)
 
         self.active_layer_btn = QToolButton()
@@ -150,7 +177,7 @@ class FeatureNavEdDockWidget(QDockWidget):
 
         self.drop_hint = QLabel("Drag a layer here or select above")
         self.drop_hint.setEnabled(False)
-        self.drop_hint.setAlignment(Qt.AlignCenter)
+        self.drop_hint.setAlignment(_AlignCenter)
         layer_layout.addWidget(self.drop_hint)
 
         layer_group.setLayout(layer_layout)
@@ -205,7 +232,7 @@ class FeatureNavEdDockWidget(QDockWidget):
 
         nav_row.addStretch()
         self.feature_label = QLabel("0 / 0")
-        self.feature_label.setAlignment(Qt.AlignCenter)
+        self.feature_label.setAlignment(_AlignCenter)
         nav_row.addWidget(self.feature_label)
         nav_row.addStretch()
 
@@ -253,7 +280,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         # The native QGIS feature form will be inserted here (stretch=1)
         self._form_placeholder = QLabel("No feature selected")
         self._form_placeholder.setEnabled(False)
-        self._form_placeholder.setAlignment(Qt.AlignCenter)
+        self._form_placeholder.setAlignment(_AlignCenter)
         self._main_layout.addWidget(self._form_placeholder, 1)
 
         self.setWidget(main_widget)
@@ -321,7 +348,10 @@ class FeatureNavEdDockWidget(QDockWidget):
             request.setSubsetOfAttributes([sort_field], layer.fields())
         else:
             request.setNoAttributes()
-        request.setFlags(QgsFeatureRequest.NoGeometry)
+        try:
+            request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+        except AttributeError:
+            request.setFlags(QgsFeatureRequest.NoGeometry)
 
         entries = []
         for feat in layer.getFeatures(request):
