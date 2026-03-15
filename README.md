@@ -2,7 +2,7 @@
 
 A QGIS plugin for navigating and editing vector layer features one by one — like the Identify tool, but with full navigation and inline editing.
 
-![Min QGIS Version](https://img.shields.io/badge/sketchy-sketchy?label=min%20QGIS&labelColor=589632&color=grey)
+![Min QGIS Version](https://img.shields.io/badge/3.22--4.x-sketchy?label=QGIS&labelColor=589632&color=grey)
 
 ---
 
@@ -15,6 +15,7 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 
 ### Feature Navigation
 - Step through features with **First**, **Previous**, **Next**, and **Last** buttons
+- **Pick from map** — click a feature directly on the canvas to jump to it (like the Identify tool)
 - Sort features by any attribute field, ascending or descending
 - Each navigated feature is automatically **selected**, **zoomed to**, and **flashed** on the map canvas
 - Feature counter shows current position (e.g. `3 / 150`)
@@ -24,9 +25,10 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 - Scrollable for layers with many attributes
 - Supports inline editing when the layer is in edit mode — changes are saved when you navigate to the next feature
 
-### Auto-zoom with Scale Control
-- Toggle auto-zoom on/off
-- Adjustable map scale (e.g. `1:500`, `1:5000`) — controls the zoom level for all geometry types
+### Auto-zoom & Scale Control
+- **Auto-zoom** — centres the map on the current feature when navigating
+- **Auto-scale** — keeps the current map canvas scale (live-synced); uncheck to set a custom scale
+- Adjustable map scale (e.g. `1:500`, `1:5000`) when auto-scale is off
 
 ---
 
@@ -51,8 +53,8 @@ Copy the `featurenaved` folder into your QGIS plugins directory:
 1. Click the **FeatureNavEd** button in the toolbar (or **Plugins** > **FeatureNavEd**)
 2. Select a vector layer from the dropdown, or drag one from the Layers panel
 3. Choose a field to sort by, and toggle ascending/descending with the arrow button
-4. Use the navigation buttons to step through features
-5. Adjust the **Scale** value to control zoom level
+4. Use the navigation buttons to step through features, or click the **Pick** button and click a feature on the map
+5. Toggle **Auto-zoom** to centre on features, and **Auto-scale** to lock/unlock the map scale
 6. To edit attributes: toggle the layer into **Edit Mode**, make changes in the form, and navigate — edits save automatically
 
 ---
@@ -74,7 +76,7 @@ featurenaved/
 
 ## Requirements
 
-- QGIS >= 3.22
+- QGIS 3.22 or later (including QGIS 4.x)
 
 ---
 
