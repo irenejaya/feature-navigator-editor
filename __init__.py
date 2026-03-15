@@ -8,7 +8,7 @@ Provides a dockable panel with previous/next navigation, sorting, and auto-zoom.
 
 __author__ = 'Irene Jaya'
 __date__ = '2026-03-14'
-__copyright__ = '(C) 2026, Jacobs'
+__copyright__ = '(C) 2026, Irene Jaya'
 
 
 def classFactory(iface):
