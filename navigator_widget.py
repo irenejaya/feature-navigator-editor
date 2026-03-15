@@ -10,7 +10,7 @@ embedded directly in the panel — no OK/Cancel dialog buttons.
 try:
     from defusedxml.ElementTree import fromstring as _xml_fromstring
 except ImportError:
-    from xml.etree.ElementTree import fromstring as _xml_fromstring
+    _xml_fromstring = None
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
@@ -39,7 +39,7 @@ from qgis.core import (
     Qgis, QgsApplication, QgsProject, QgsMapLayerProxyModel,
     QgsVectorLayer, QgsCoordinateTransform
 )
-from qgis.gui import QgsMapLayerComboBox
+from qgis.gui import QgsMapLayerComboBox, QgsMapToolIdentifyFeature
 
 try:
     from qgis.core import NULL
@@ -86,6 +86,8 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.current_index = -1
         self.sort_ascending = True
         self._feature_form = None
+        self._pick_tool = None
+        self._prev_map_tool = None
 
         self.setAllowedAreas(_AllDockAreas)
         self.setObjectName("FeatureNavEdDockWidget")
@@ -119,6 +121,8 @@ class FeatureNavEdDockWidget(QDockWidget):
             super().dropEvent(event)
 
     def _extract_layer_from_drop(self, mime_data):
+        if _xml_fromstring is None:
+            return None
         if not mime_data.hasFormat('application/qgis.layertreemodeldata'):
             return None
         data = bytes(mime_data.data('application/qgis.layertreemodeldata'))
@@ -252,6 +256,15 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.last_btn.setAutoRaise(True)
         nav_row.addWidget(self.last_btn)
 
+        self.pick_btn = QToolButton()
+        self.pick_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionIdentify.svg')
+        )
+        self.pick_btn.setToolTip("Pick feature from map")
+        self.pick_btn.setAutoRaise(True)
+        self.pick_btn.setCheckable(True)
+        nav_row.addWidget(self.pick_btn)
+
         nav_layout.addLayout(nav_row)
 
         # Options
@@ -298,6 +311,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.prev_btn.clicked.connect(self._go_prev)
         self.next_btn.clicked.connect(self._go_next)
         self.last_btn.clicked.connect(self._go_last)
+        self.pick_btn.toggled.connect(self._toggle_pick_mode)
 
     # =========================================================================
     # LAYER HANDLING
@@ -421,6 +435,66 @@ class FeatureNavEdDockWidget(QDockWidget):
             self._accept_current_form()
             self.current_index = len(self.feature_ids) - 1
             self._navigate_to_current()
+
+    # =========================================================================
+    # PICK FROM MAP
+    # =========================================================================
+
+    def _toggle_pick_mode(self, active):
+        """Activate or deactivate the map pick tool."""
+        canvas = self.iface.mapCanvas()
+        if active:
+            layer = self.layer_combo.currentLayer()
+            if not isinstance(layer, QgsVectorLayer):
+                self.pick_btn.setChecked(False)
+                return
+            self._prev_map_tool = canvas.mapTool()
+            self._pick_tool = QgsMapToolIdentifyFeature(canvas, layer)
+            self._pick_tool.setCursor(QgsApplication.getThemeCursor(QgsApplication.Cursor.Identify))
+            self._pick_tool.featureIdentified.connect(self._on_feature_picked)
+            canvas.setMapTool(self._pick_tool)
+            canvas.mapToolSet.connect(self._on_map_tool_changed)
+        else:
+            self._deactivate_pick_tool()
+
+    def _on_feature_picked(self, feature):
+        """Handle a feature clicked on the map."""
+        fid = feature.id()
+        if fid in self.feature_ids:
+            self._accept_current_form()
+            self.current_index = self.feature_ids.index(fid)
+            self._navigate_to_current()
+
+    def _on_map_tool_changed(self, new_tool):
+        """Uncheck pick button when user switches to another map tool."""
+        if new_tool is not self._pick_tool:
+            try:
+                self.iface.mapCanvas().mapToolSet.disconnect(self._on_map_tool_changed)
+            except Exception:
+                pass
+            self.pick_btn.blockSignals(True)
+            self.pick_btn.setChecked(False)
+            self.pick_btn.blockSignals(False)
+
+    def _deactivate_pick_tool(self):
+        """Restore previous map tool and clean up."""
+        canvas = self.iface.mapCanvas()
+        try:
+            canvas.mapToolSet.disconnect(self._on_map_tool_changed)
+        except Exception:
+            pass
+        if self._pick_tool is not None:
+            try:
+                self._pick_tool.featureIdentified.disconnect(self._on_feature_picked)
+            except Exception:
+                pass
+            if canvas.mapTool() is self._pick_tool:
+                if self._prev_map_tool:
+                    canvas.setMapTool(self._prev_map_tool)
+                else:
+                    canvas.unsetMapTool(self._pick_tool)
+            self._pick_tool = None
+        self._prev_map_tool = None
 
     def _navigate_to_current(self):
         layer = self.layer_combo.currentLayer()
