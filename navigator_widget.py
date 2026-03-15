@@ -271,11 +271,17 @@ class FeatureNavEdDockWidget(QDockWidget):
         options_row = QHBoxLayout()
         self.auto_zoom_cb = QCheckBox("Auto-zoom")
         self.auto_zoom_cb.setChecked(True)
-        self.auto_zoom_cb.setToolTip("Zoom to feature when navigating")
+        self.auto_zoom_cb.setToolTip("Centre on feature when navigating")
         options_row.addWidget(self.auto_zoom_cb)
 
+        self.auto_scale_cb = QCheckBox("Auto-scale")
+        self.auto_scale_cb.setChecked(True)
+        self.auto_scale_cb.setToolTip("Use current map canvas scale (uncheck to set a custom scale)")
+        options_row.addWidget(self.auto_scale_cb)
+
         options_row.addStretch()
-        options_row.addWidget(QLabel("Scale:"))
+        self._scale_label = QLabel("Scale:")
+        options_row.addWidget(self._scale_label)
 
         self.scale_spin = QSpinBox()
         self.scale_spin.setRange(100, 1000000)
@@ -284,6 +290,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.scale_spin.setPrefix("1:")
         self.scale_spin.setToolTip("Map scale when zooming to features")
         options_row.addWidget(self.scale_spin)
+        self._update_scale_controls(self.auto_scale_cb.isChecked())
 
         nav_layout.addLayout(options_row)
         nav_group.setLayout(nav_layout)
@@ -312,6 +319,8 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.next_btn.clicked.connect(self._go_next)
         self.last_btn.clicked.connect(self._go_last)
         self.pick_btn.toggled.connect(self._toggle_pick_mode)
+        self.auto_scale_cb.toggled.connect(self._update_scale_controls)
+        self.iface.mapCanvas().scaleChanged.connect(self._on_canvas_scale_changed)
 
     # =========================================================================
     # LAYER HANDLING
@@ -324,6 +333,27 @@ class FeatureNavEdDockWidget(QDockWidget):
             self.layer_combo.setLayer(active)
         else:
             self._reload_features()
+
+    def _update_scale_controls(self, checked):
+        """Enable/disable the scale spinbox based on auto-scale checkbox."""
+        self._scale_label.setEnabled(not checked)
+        self.scale_spin.setEnabled(not checked)
+        if checked:
+            self._sync_scale_from_canvas()
+
+    def _on_canvas_scale_changed(self, scale):
+        """Update spinbox when canvas scale changes and auto-scale is on."""
+        if self.auto_scale_cb.isChecked():
+            self.scale_spin.blockSignals(True)
+            self.scale_spin.setValue(round(scale))
+            self.scale_spin.blockSignals(False)
+
+    def _sync_scale_from_canvas(self):
+        """Sync spinbox value to current canvas scale."""
+        scale = round(self.iface.mapCanvas().scale())
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(scale)
+        self.scale_spin.blockSignals(False)
 
     def _on_layer_changed(self, layer):
         self.sort_field_combo.blockSignals(True)
@@ -538,7 +568,8 @@ class FeatureNavEdDockWidget(QDockWidget):
         center = geom.centroid().asPoint()
         transformed = transform.transform(center)
         canvas.setCenter(transformed)
-        canvas.zoomScale(self.scale_spin.value())
+        if not self.auto_scale_cb.isChecked():
+            canvas.zoomScale(self.scale_spin.value())
         canvas.refresh()
 
     # =========================================================================
