@@ -10,8 +10,13 @@ about=FeatureNavEd is a dockable panel that lets you navigate and edit features 
     <b>Attribute Form</b> — Displays the native QGIS attribute form for each feature, matching the exact look of the built-in feature form. Supports inline editing when the layer is in edit mode.
     <b>Auto-zoom</b> — Configurable map scale control lets you adjust the zoom level when navigating between features.
     <b>Identify Feature Attribute</b> — Click a feature directly on the map canvas to jump to it in the panel, just like the Identify tool but can directly edit them when in Editing mode.
+    <br><br>
+    <b>Top Toolbar</b> — Quick-access icons for Pick from Map, Filter, Find, and Open Attribute Table.
+    <b>Find</b> — Search for features by field value with autocomplete dropdown, without filtering the navigation list.
+    <b>Filter</b> — Collapsible filter bar with expression-based filtering and selected-features-only mode.
+    <b>Sort Value Display</b> — The Sort By group title shows the current feature's sort field value for quick reference.
 
-version=1.0.0
+version=1.0.1
 author=Irene Jaya
 email=irenejaya1@gmail.com
 tracker=https://github.com/irenejaya/feature-navigator-editor/issues
@@ -29,6 +34,14 @@ hasProcessingProvider=no
 server=False
 
 changelog=
+    1.0.1 - UI improvements and new features
+        * Top toolbar with quick-access icons (Pick, Filter, Find, Attribute Table)
+        * Find feature by field value with autocomplete dropdown (no filtering)
+        * Collapsible filter bar with expression input and selected-only toggle
+        * Sort field value shown in group title for quick reference
+        * Open Attribute Table button
+        * Removed bookmark feature
+        * Cleaner, more minimal layout
     1.0.0 - Initial release
         * Dockable panel with layer selection and drag-and-drop support
         * Feature navigation with First/Previous/Next/Last buttons
