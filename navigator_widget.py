@@ -13,10 +13,12 @@ except ImportError:
     _xml_fromstring = None
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QKeySequence
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QCheckBox,
-    QGroupBox, QSpinBox, QToolButton, QDialogButtonBox
+    QLabel, QComboBox, QCheckBox, QShortcut,
+    QGroupBox, QSpinBox, QToolButton, QDialogButtonBox,
+    QLineEdit, QCompleter
 )
 
 # Qt5/Qt6 enum compatibility
@@ -39,7 +41,7 @@ from qgis.core import (
     Qgis, QgsApplication, QgsProject, QgsMapLayerProxyModel,
     QgsVectorLayer, QgsCoordinateTransform
 )
-from qgis.gui import QgsMapLayerComboBox, QgsMapToolIdentifyFeature
+from qgis.gui import QgsMapLayerComboBox, QgsMapToolIdentifyFeature, QgsExpressionLineEdit
 
 try:
     from qgis.core import NULL
@@ -88,6 +90,8 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._feature_form = None
         self._pick_tool = None
         self._prev_map_tool = None
+        self._current_layer_id = None
+        self._layer_positions = {}
 
         self.setAllowedAreas(_AllDockAreas)
         self.setObjectName("FeatureNavEdDockWidget")
@@ -148,13 +152,123 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._main_layout.setContentsMargins(4, 4, 4, 4)
         self._main_layout.setSpacing(4)
 
+        # --- Top Toolbar ---
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setSpacing(2)
+
+        self.pick_btn = QToolButton()
+        self.pick_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionIdentify.svg')
+        )
+        self.pick_btn.setToolTip("Pick feature from map")
+        self.pick_btn.setAutoRaise(True)
+        self.pick_btn.setCheckable(True)
+        toolbar_row.addWidget(self.pick_btn)
+
+        self.filter_btn = QToolButton()
+        self.filter_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionFilter2.svg')
+        )
+        self.filter_btn.setToolTip("Toggle filter bar")
+        self.filter_btn.setAutoRaise(True)
+        self.filter_btn.setCheckable(True)
+        toolbar_row.addWidget(self.filter_btn)
+
+        self.search_btn = QToolButton()
+        self.search_btn.setIcon(
+            QgsApplication.getThemeIcon('/search.svg')
+        )
+        self.search_btn.setToolTip("Find feature by expression (no filtering)")
+        self.search_btn.setAutoRaise(True)
+        self.search_btn.setCheckable(True)
+        toolbar_row.addWidget(self.search_btn)
+
+        self.attr_table_btn = QToolButton()
+        self.attr_table_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionOpenTable.svg')
+        )
+        self.attr_table_btn.setToolTip("Open attribute table")
+        self.attr_table_btn.setAutoRaise(True)
+        toolbar_row.addWidget(self.attr_table_btn)
+
+        toolbar_row.addStretch()
+        self._main_layout.addLayout(toolbar_row)
+
+        # --- Search Bar (collapsible) ---
+        self._search_bar = QWidget()
+        search_bar_layout = QHBoxLayout(self._search_bar)
+        search_bar_layout.setContentsMargins(0, 0, 0, 0)
+        search_bar_layout.setSpacing(2)
+
+        self.search_field_combo = QComboBox()
+        self.search_field_combo.setToolTip("Field to search")
+        search_bar_layout.addWidget(self.search_field_combo)
+
+        self.search_value_edit = QLineEdit()
+        self.search_value_edit.setPlaceholderText("Value...")
+        self.search_value_edit.setClearButtonEnabled(True)
+        self.search_value_edit.setToolTip("Value to find (exact match)")
+        self._search_completer = QCompleter([], self.search_value_edit)
+        self._search_completer.setCaseSensitivity(
+            getattr(Qt, 'CaseInsensitive', None) or Qt.CaseSensitivity.CaseInsensitive
+        )
+        self._search_completer.setFilterMode(
+            getattr(Qt, 'MatchContains', None) or Qt.MatchFlag.MatchContains
+        )
+        self.search_value_edit.setCompleter(self._search_completer)
+        search_bar_layout.addWidget(self.search_value_edit, 1)
+
+        self.search_go_btn = QToolButton()
+        self.search_go_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionZoomToSelected.svg')
+        )
+        self.search_go_btn.setToolTip("Go to match (Enter)")
+        self.search_go_btn.setAutoRaise(True)
+        search_bar_layout.addWidget(self.search_go_btn)
+
+        self.search_prev_btn = QToolButton()
+        self.search_prev_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionArrowUp.svg')
+        )
+        self.search_prev_btn.setToolTip("Previous match")
+        self.search_prev_btn.setAutoRaise(True)
+        search_bar_layout.addWidget(self.search_prev_btn)
+
+        self.search_next_btn = QToolButton()
+        self.search_next_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionArrowDown.svg')
+        )
+        self.search_next_btn.setToolTip("Next match")
+        self.search_next_btn.setAutoRaise(True)
+        search_bar_layout.addWidget(self.search_next_btn)
+
+        self._search_bar.setVisible(False)
+        self._main_layout.addWidget(self._search_bar)
+
+        # --- Filter Bar (collapsible) ---
+        self._filter_bar = QWidget()
+        filter_bar_layout = QHBoxLayout(self._filter_bar)
+        filter_bar_layout.setContentsMargins(0, 0, 0, 0)
+        filter_bar_layout.setSpacing(4)
+
+        self.filter_expression = QgsExpressionLineEdit()
+        self.filter_expression.setExpressionDialogTitle("Filter Expression")
+        self.filter_expression.setToolTip("Expression to filter features")
+        filter_bar_layout.addWidget(self.filter_expression, 1)
+
+        self.selected_only_cb = QCheckBox("Selected only")
+        self.selected_only_cb.setToolTip("Navigate only through currently selected features")
+        filter_bar_layout.addWidget(self.selected_only_cb)
+
+        self._filter_bar.setVisible(False)
+        self._main_layout.addWidget(self._filter_bar)
+
         # --- Layer ---
         layer_group = QGroupBox("Layer")
-        layer_layout = QVBoxLayout()
+        layer_layout = QHBoxLayout()
         layer_layout.setContentsMargins(4, 4, 4, 4)
-        layer_layout.setSpacing(2)
+        layer_layout.setSpacing(4)
 
-        layer_row = QHBoxLayout()
         self.layer_combo = QgsMapLayerComboBox()
         try:
             self.layer_combo.setFilters(Qgis.LayerFilter.VectorLayer)
@@ -168,7 +282,7 @@ class FeatureNavEdDockWidget(QDockWidget):
             self.layer_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         except AttributeError:
             self.layer_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        layer_row.addWidget(self.layer_combo)
+        layer_layout.addWidget(self.layer_combo)
 
         self.active_layer_btn = QToolButton()
         self.active_layer_btn.setIcon(
@@ -176,19 +290,13 @@ class FeatureNavEdDockWidget(QDockWidget):
         )
         self.active_layer_btn.setToolTip("Use active layer / reload")
         self.active_layer_btn.setAutoRaise(True)
-        layer_row.addWidget(self.active_layer_btn)
-        layer_layout.addLayout(layer_row)
-
-        self.drop_hint = QLabel("Drag a layer here or select above")
-        self.drop_hint.setEnabled(False)
-        self.drop_hint.setAlignment(_AlignCenter)
-        layer_layout.addWidget(self.drop_hint)
+        layer_layout.addWidget(self.active_layer_btn)
 
         layer_group.setLayout(layer_layout)
         self._main_layout.addWidget(layer_group)
 
         # --- Sort ---
-        sort_group = QGroupBox("Sort By")
+        self._sort_group = QGroupBox("Sort By")
         sort_layout = QHBoxLayout()
         sort_layout.setContentsMargins(4, 4, 4, 4)
         sort_layout.setSpacing(4)
@@ -206,8 +314,8 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.sort_order_btn.setIconSize(self.sort_order_btn.iconSize() * 1.2)
         sort_layout.addWidget(self.sort_order_btn)
 
-        sort_group.setLayout(sort_layout)
-        self._main_layout.addWidget(sort_group)
+        self._sort_group.setLayout(sort_layout)
+        self._main_layout.addWidget(self._sort_group)
 
         # --- Navigate ---
         nav_group = QGroupBox("Navigate")
@@ -222,7 +330,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.first_btn.setIcon(
             QgsApplication.getThemeIcon('/mActionDoubleArrowLeft.svg')
         )
-        self.first_btn.setToolTip("First feature")
+        self.first_btn.setToolTip("First feature (Alt+Home)")
         self.first_btn.setAutoRaise(True)
         nav_row.addWidget(self.first_btn)
 
@@ -230,21 +338,26 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.prev_btn.setIcon(
             QgsApplication.getThemeIcon('/mActionArrowLeft.svg')
         )
-        self.prev_btn.setToolTip("Previous feature")
+        self.prev_btn.setToolTip("Previous feature (Alt+Left)")
         self.prev_btn.setAutoRaise(True)
         nav_row.addWidget(self.prev_btn)
 
         nav_row.addStretch()
-        self.feature_label = QLabel("0 / 0")
-        self.feature_label.setAlignment(_AlignCenter)
-        nav_row.addWidget(self.feature_label)
+        self.feature_spin = QSpinBox()
+        self.feature_spin.setRange(0, 0)
+        self.feature_spin.setAlignment(_AlignCenter)
+        self.feature_spin.setToolTip("Type a feature number to jump to it")
+        self.feature_spin.setKeyboardTracking(False)
+        nav_row.addWidget(self.feature_spin)
+        self.feature_total_label = QLabel("/ 0")
+        nav_row.addWidget(self.feature_total_label)
         nav_row.addStretch()
 
         self.next_btn = QToolButton()
         self.next_btn.setIcon(
             QgsApplication.getThemeIcon('/mActionArrowRight.svg')
         )
-        self.next_btn.setToolTip("Next feature")
+        self.next_btn.setToolTip("Next feature (Alt+Right)")
         self.next_btn.setAutoRaise(True)
         nav_row.addWidget(self.next_btn)
 
@@ -252,18 +365,9 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.last_btn.setIcon(
             QgsApplication.getThemeIcon('/mActionDoubleArrowRight.svg')
         )
-        self.last_btn.setToolTip("Last feature")
+        self.last_btn.setToolTip("Last feature (Alt+End)")
         self.last_btn.setAutoRaise(True)
         nav_row.addWidget(self.last_btn)
-
-        self.pick_btn = QToolButton()
-        self.pick_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionIdentify.svg')
-        )
-        self.pick_btn.setToolTip("Pick feature from map")
-        self.pick_btn.setAutoRaise(True)
-        self.pick_btn.setCheckable(True)
-        nav_row.addWidget(self.pick_btn)
 
         nav_layout.addLayout(nav_row)
 
@@ -303,6 +407,20 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._form_placeholder.setAlignment(_AlignCenter)
         self._main_layout.addWidget(self._form_placeholder, 1)
 
+        # --- Keyboard shortcuts ---
+        _WidgetShortcut = (
+            getattr(Qt, 'WidgetWithChildrenShortcut', None)
+            or Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._shortcut_prev = QShortcut(QKeySequence("Alt+Left"), main_widget)
+        self._shortcut_prev.setContext(_WidgetShortcut)
+        self._shortcut_next = QShortcut(QKeySequence("Alt+Right"), main_widget)
+        self._shortcut_next.setContext(_WidgetShortcut)
+        self._shortcut_first = QShortcut(QKeySequence("Alt+Home"), main_widget)
+        self._shortcut_first.setContext(_WidgetShortcut)
+        self._shortcut_last = QShortcut(QKeySequence("Alt+End"), main_widget)
+        self._shortcut_last.setContext(_WidgetShortcut)
+
         self.setWidget(main_widget)
 
     # =========================================================================
@@ -314,13 +432,28 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.active_layer_btn.clicked.connect(self._use_active_layer)
         self.sort_field_combo.currentIndexChanged.connect(self._reload_features)
         self.sort_order_btn.clicked.connect(self._toggle_sort_order)
+        self.filter_btn.toggled.connect(self._filter_bar.setVisible)
+        self.search_btn.toggled.connect(self._search_bar.setVisible)
+        self.search_go_btn.clicked.connect(self._go_next_match)
+        self.search_next_btn.clicked.connect(self._go_next_match)
+        self.search_prev_btn.clicked.connect(self._go_prev_match)
+        self.search_value_edit.returnPressed.connect(self._go_next_match)
+        self.search_field_combo.currentIndexChanged.connect(self._populate_search_values)
+        self.attr_table_btn.clicked.connect(self._open_attribute_table)
+        self.filter_expression.expressionChanged.connect(self._on_filter_changed)
+        self.selected_only_cb.toggled.connect(lambda *_: self._reload_features())
         self.first_btn.clicked.connect(self._go_first)
         self.prev_btn.clicked.connect(self._go_prev)
         self.next_btn.clicked.connect(self._go_next)
         self.last_btn.clicked.connect(self._go_last)
+        self.feature_spin.valueChanged.connect(self._go_to_feature_number)
         self.pick_btn.toggled.connect(self._toggle_pick_mode)
         self.auto_scale_cb.toggled.connect(self._update_scale_controls)
         self.iface.mapCanvas().scaleChanged.connect(self._on_canvas_scale_changed)
+        self._shortcut_prev.activated.connect(self._go_prev)
+        self._shortcut_next.activated.connect(self._go_next)
+        self._shortcut_first.activated.connect(self._go_first)
+        self._shortcut_last.activated.connect(self._go_last)
 
     # =========================================================================
     # LAYER HANDLING
@@ -356,6 +489,24 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.scale_spin.blockSignals(False)
 
     def _on_layer_changed(self, layer):
+        # Save position for the previous layer
+        if self._current_layer_id and self.feature_ids and self.current_index >= 0:
+            fid = self.feature_ids[self.current_index]
+            self._layer_positions[self._current_layer_id] = (self.current_index, fid)
+
+        # Disconnect selection signal from old layer
+        old_layer = (
+            QgsProject.instance().mapLayer(self._current_layer_id)
+            if self._current_layer_id else None
+        )
+        if isinstance(old_layer, QgsVectorLayer):
+            try:
+                old_layer.selectionChanged.disconnect(self._on_selection_changed)
+            except Exception:
+                pass
+
+        self._current_layer_id = layer.id() if isinstance(layer, QgsVectorLayer) else None
+
         self.sort_field_combo.blockSignals(True)
         self.sort_field_combo.clear()
         self.feature_ids = []
@@ -365,12 +516,32 @@ class FeatureNavEdDockWidget(QDockWidget):
             self.sort_field_combo.addItem("(Feature ID)", None)
             for field in layer.fields():
                 self.sort_field_combo.addItem(field.name(), field.name())
-            self.drop_hint.setVisible(False)
+            self.filter_expression.setLayer(layer)
+            self.filter_expression.setExpression('')
+            self.search_field_combo.clear()
+            for field in layer.fields():
+                self.search_field_combo.addItem(field.name(), field.name())
+            self.search_value_edit.clear()
+            self._populate_search_values()
+            layer.selectionChanged.connect(self._on_selection_changed)
         else:
-            self.drop_hint.setVisible(True)
+            self.filter_expression.setLayer(None)
+            self.search_field_combo.clear()
+            self.search_value_edit.clear()
+            self._search_completer.model().setStringList([])
 
         self.sort_field_combo.blockSignals(False)
         self._reload_features()
+
+        # Restore saved position for this layer
+        if self._current_layer_id and self._current_layer_id in self._layer_positions:
+            saved_index, saved_fid = self._layer_positions[self._current_layer_id]
+            if saved_fid in self.feature_ids:
+                self.current_index = self.feature_ids.index(saved_fid)
+            elif 0 <= saved_index < len(self.feature_ids):
+                self.current_index = saved_index
+            if self.current_index >= 0:
+                self._navigate_to_current()
 
     # =========================================================================
     # SORTING AND LOADING
@@ -385,13 +556,19 @@ class FeatureNavEdDockWidget(QDockWidget):
             return
 
         sort_field = self.sort_field_combo.currentData()
+        filter_expr = self.filter_expression.expression()
 
-        from qgis.core import QgsFeatureRequest
+        from qgis.core import QgsFeatureRequest, QgsExpression
         request = QgsFeatureRequest()
-        if sort_field:
+
+        # Apply expression filter if valid
+        if filter_expr and not QgsExpression(filter_expr).hasParserError():
+            request.setFilterExpression(filter_expr)
+        elif sort_field:
             request.setSubsetOfAttributes([sort_field], layer.fields())
         else:
             request.setNoAttributes()
+
         try:
             request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
         except AttributeError:
@@ -421,6 +598,12 @@ class FeatureNavEdDockWidget(QDockWidget):
             )
 
         self.feature_ids = [e[0] for e in entries]
+
+        # Filter to selected features only
+        if self.selected_only_cb.isChecked():
+            selected = set(layer.selectedFeatureIds())
+            self.feature_ids = [fid for fid in self.feature_ids if fid in selected]
+
         self.current_index = 0 if self.feature_ids else -1
         self._navigate_to_current()
 
@@ -465,6 +648,87 @@ class FeatureNavEdDockWidget(QDockWidget):
             self._accept_current_form()
             self.current_index = len(self.feature_ids) - 1
             self._navigate_to_current()
+
+    def _go_to_feature_number(self, number):
+        """Jump to a 1-based feature number typed in the spinbox."""
+        idx = number - 1
+        if self.feature_ids and 0 <= idx < len(self.feature_ids) and idx != self.current_index:
+            self._accept_current_form()
+            self.current_index = idx
+            self._navigate_to_current()
+
+    def _on_filter_changed(self, *args):
+        """Reload features when the filter expression changes."""
+        expr = self.filter_expression.expression()
+        if not expr:
+            self._reload_features()
+            return
+        from qgis.core import QgsExpression
+        if not QgsExpression(expr).hasParserError():
+            self._reload_features()
+
+    def _on_selection_changed(self):
+        """Reload features when selection changes and 'Selected only' is active."""
+        if self.selected_only_cb.isChecked():
+            self._reload_features()
+
+    # =========================================================================
+    # FIND / GO TO
+    # =========================================================================
+
+    def _populate_search_values(self):
+        """Populate the completer with unique values from the selected search field."""
+        field_name = self.search_field_combo.currentData()
+        layer = self.layer_combo.currentLayer()
+        if not field_name or not isinstance(layer, QgsVectorLayer):
+            self._search_completer.model().setStringList([])
+            return
+        idx = layer.fields().indexOf(field_name)
+        if idx < 0:
+            self._search_completer.model().setStringList([])
+            return
+        values = layer.uniqueValues(idx)
+        strings = sorted(
+            str(v) for v in values if v is not None and v != NULL
+        )
+        self._search_completer.model().setStringList(strings)
+
+    def _go_next_match(self):
+        """Jump to the next feature matching the search expression."""
+        self._find_match(forward=True)
+
+    def _go_prev_match(self):
+        """Jump to the previous feature matching the search expression."""
+        self._find_match(forward=False)
+
+    def _find_match(self, forward=True):
+        """Find and navigate to the next/previous feature matching the search field + value."""
+        search_field = self.search_field_combo.currentData()
+        search_value = self.search_value_edit.text().strip()
+        if not search_field or not search_value:
+            return
+        layer = self.layer_combo.currentLayer()
+        if not isinstance(layer, QgsVectorLayer) or not self.feature_ids:
+            return
+
+        total = len(self.feature_ids)
+        start = self.current_index
+        step = 1 if forward else -1
+
+        for offset in range(1, total + 1):
+            idx = (start + offset * step) % total
+            fid = self.feature_ids[idx]
+            feat = layer.getFeature(fid)
+            if not feat.isValid():
+                continue
+            val = feat[search_field]
+            if val is None or val == NULL:
+                continue
+            if str(val) == search_value:
+                self._accept_current_form()
+                self.current_index = idx
+                self._navigate_to_current()
+                return
 
     # =========================================================================
     # PICK FROM MAP
@@ -622,8 +886,11 @@ class FeatureNavEdDockWidget(QDockWidget):
     def _update_display(self):
         total = len(self.feature_ids)
 
+        self.feature_spin.blockSignals(True)
         if total == 0:
-            self.feature_label.setText("0 / 0")
+            self.feature_spin.setRange(0, 0)
+            self.feature_spin.setValue(0)
+            self.feature_total_label.setText("/ 0")
             self.first_btn.setEnabled(False)
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
@@ -631,10 +898,40 @@ class FeatureNavEdDockWidget(QDockWidget):
             self._remove_current_form()
             self._form_placeholder.setText("No feature selected")
             self._form_placeholder.setVisible(True)
+            self.feature_spin.blockSignals(False)
+            self._update_sort_value()
             return
 
-        self.feature_label.setText(f"{self.current_index + 1} / {total}")
+        self.feature_spin.setRange(1, total)
+        self.feature_spin.setValue(self.current_index + 1)
+        self.feature_total_label.setText(f"/ {total}")
+        self.feature_spin.blockSignals(False)
         self.first_btn.setEnabled(self.current_index > 0)
         self.prev_btn.setEnabled(self.current_index > 0)
         self.next_btn.setEnabled(self.current_index < total - 1)
         self.last_btn.setEnabled(self.current_index < total - 1)
+        self._update_sort_value()
+
+    def _update_sort_value(self):
+        """Update the sort group title with the current feature's sort field value."""
+        sort_field = self.sort_field_combo.currentData()
+        layer = self.layer_combo.currentLayer()
+        if not sort_field or not isinstance(layer, QgsVectorLayer) or self.current_index < 0:
+            self._sort_group.setTitle("Sort By")
+            return
+        fid = self.feature_ids[self.current_index]
+        feat = layer.getFeature(fid)
+        if not feat.isValid():
+            self._sort_group.setTitle("Sort By")
+            return
+        val = feat[sort_field]
+        if val is None or val == NULL:
+            self._sort_group.setTitle(f"Sort By \u2014 {sort_field}: NULL")
+        else:
+            self._sort_group.setTitle(f"Sort By \u2014 {sort_field}: {val}")
+
+    def _open_attribute_table(self):
+        """Open the attribute table for the current layer."""
+        layer = self.layer_combo.currentLayer()
+        if isinstance(layer, QgsVectorLayer):
+            self.iface.showAttributeTable(layer)
