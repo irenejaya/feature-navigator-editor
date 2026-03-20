@@ -92,6 +92,8 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._prev_map_tool = None
         self._current_layer_id = None
         self._layer_positions = {}
+        self._history = []          # list of (layer_id, fid)
+        self._navigating_back = False
 
         self.setAllowedAreas(_AllDockAreas)
         self.setObjectName("FeatureNavEdDockWidget")
@@ -190,6 +192,15 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.attr_table_btn.setToolTip("Open attribute table")
         self.attr_table_btn.setAutoRaise(True)
         toolbar_row.addWidget(self.attr_table_btn)
+
+        self.back_btn = QToolButton()
+        self.back_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionUndo.svg')
+        )
+        self.back_btn.setToolTip("Go back to last viewed feature")
+        self.back_btn.setAutoRaise(True)
+        self.back_btn.setEnabled(False)
+        toolbar_row.addWidget(self.back_btn)
 
         toolbar_row.addStretch()
         self._main_layout.addLayout(toolbar_row)
@@ -448,6 +459,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.search_value_edit.returnPressed.connect(self._go_next_match)
         self.search_field_combo.currentIndexChanged.connect(self._populate_search_values)
         self.attr_table_btn.clicked.connect(self._open_attribute_table)
+        self.back_btn.clicked.connect(self._go_back)
         self.filter_expression.expressionChanged.connect(self._on_filter_changed)
         self.selected_only_cb.toggled.connect(lambda *_: self._reload_features())
         self.first_btn.clicked.connect(self._go_first)
@@ -614,7 +626,8 @@ class FeatureNavEdDockWidget(QDockWidget):
             self.feature_ids = [fid for fid in self.feature_ids if fid in selected]
 
         self.current_index = 0 if self.feature_ids else -1
-        self._navigate_to_current()
+        if not self._navigating_back:
+            self._navigate_to_current()
 
     def _toggle_sort_order(self):
         self.sort_ascending = not self.sort_ascending
@@ -636,24 +649,28 @@ class FeatureNavEdDockWidget(QDockWidget):
 
     def _go_first(self):
         if self.feature_ids:
+            self._push_history()
             self._accept_current_form()
             self.current_index = 0
             self._navigate_to_current()
 
     def _go_prev(self):
         if self.feature_ids and self.current_index > 0:
+            self._push_history()
             self._accept_current_form()
             self.current_index -= 1
             self._navigate_to_current()
 
     def _go_next(self):
         if self.feature_ids and self.current_index < len(self.feature_ids) - 1:
+            self._push_history()
             self._accept_current_form()
             self.current_index += 1
             self._navigate_to_current()
 
     def _go_last(self):
         if self.feature_ids:
+            self._push_history()
             self._accept_current_form()
             self.current_index = len(self.feature_ids) - 1
             self._navigate_to_current()
@@ -662,6 +679,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         """Jump to a 1-based feature number typed in the spinbox."""
         idx = number - 1
         if self.feature_ids and 0 <= idx < len(self.feature_ids) and idx != self.current_index:
+            self._push_history()
             self._accept_current_form()
             self.current_index = idx
             self._navigate_to_current()
@@ -680,6 +698,43 @@ class FeatureNavEdDockWidget(QDockWidget):
         """Reload features when selection changes and 'Selected only' is active."""
         if self.selected_only_cb.isChecked():
             self._reload_features()
+
+    def _push_history(self):
+        """Push the current feature position onto the navigation history stack."""
+        if self.current_index < 0 or not self.feature_ids or not self._current_layer_id:
+            return
+        fid = self.feature_ids[self.current_index]
+        entry = (self._current_layer_id, fid)
+        if self._history and self._history[-1] == entry:
+            return
+        self._history.append(entry)
+        self.back_btn.setEnabled(True)
+
+    def _go_back(self):
+        """Navigate back to the previously viewed feature."""
+        if not self._history:
+            return
+
+        layer_id, fid = self._history.pop()
+        self.back_btn.setEnabled(bool(self._history))
+
+        target_layer = QgsProject.instance().mapLayer(layer_id)
+        if not isinstance(target_layer, QgsVectorLayer):
+            # Layer no longer exists — keep popping
+            if self._history:
+                self._go_back()
+            return
+
+        self._navigating_back = True
+        if self.layer_combo.currentLayer() != target_layer:
+            self.layer_combo.setLayer(target_layer)
+            # _on_layer_changed → _reload_features populates feature_ids
+            # but skips auto-navigate because _navigating_back is True
+
+        if fid in self.feature_ids:
+            self.current_index = self.feature_ids.index(fid)
+            self._navigate_to_current()
+        self._navigating_back = False
 
     # =========================================================================
     # FIND / GO TO
@@ -734,6 +789,7 @@ class FeatureNavEdDockWidget(QDockWidget):
             if val is None or val == NULL:
                 continue
             if str(val) == search_value:
+                self._push_history()
                 self._accept_current_form()
                 self.current_index = idx
                 self._navigate_to_current()
@@ -764,6 +820,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         """Handle a feature clicked on the map."""
         fid = feature.id()
         if fid in self.feature_ids:
+            self._push_history()
             self._accept_current_form()
             self.current_index = self.feature_ids.index(fid)
             self._navigate_to_current()
