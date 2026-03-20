@@ -16,7 +16,7 @@ about=FeatureNavEd is a dockable panel that lets you navigate and edit features 
     <b>Filter</b> — Collapsible filter bar with expression-based filtering and selected-features-only mode.
     <b>Sort Value Display</b> — The Sort By group title shows the current feature's sort field value for quick reference.
 
-version=1.0.1
+version=1.0.2
 author=Irene Jaya
 email=irenejaya1@gmail.com
 tracker=https://github.com/irenejaya/feature-navigator-editor/issues
@@ -34,6 +34,10 @@ hasProcessingProvider=no
 server=False
 
 changelog=
+    1.0.2 - Back navigation and flash button
+        * Back button in toolbar to return to last viewed feature (history tracked across all nav actions)
+        * Flash / re-zoom button in Navigate box to re-blink and re-centre the current feature
+        * VxD monotonic check removed from Parcels QA (Flood Level and Depth only)
     1.0.1 - UI improvements and new features
         * Top toolbar with quick-access icons (Pick, Filter, Find, Attribute Table)
         * Find feature by field value with autocomplete dropdown (no filtering)
