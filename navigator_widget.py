@@ -369,6 +369,14 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.last_btn.setAutoRaise(True)
         nav_row.addWidget(self.last_btn)
 
+        self.flash_btn = QToolButton()
+        self.flash_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionHighlightFeature.svg')
+        )
+        self.flash_btn.setToolTip("Flash feature again")
+        self.flash_btn.setAutoRaise(True)
+        nav_row.addWidget(self.flash_btn)
+
         nav_layout.addLayout(nav_row)
 
         # Options
@@ -448,6 +456,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.last_btn.clicked.connect(self._go_last)
         self.feature_spin.valueChanged.connect(self._go_to_feature_number)
         self.pick_btn.toggled.connect(self._toggle_pick_mode)
+        self.flash_btn.clicked.connect(self._flash_current)
         self.auto_scale_cb.toggled.connect(self._update_scale_controls)
         self.iface.mapCanvas().scaleChanged.connect(self._on_canvas_scale_changed)
         self._shortcut_prev.activated.connect(self._go_prev)
@@ -789,6 +798,24 @@ class FeatureNavEdDockWidget(QDockWidget):
                     canvas.unsetMapTool(self._pick_tool)
             self._pick_tool = None
         self._prev_map_tool = None
+
+    def _flash_current(self):
+        """Re-flash the current feature and optionally re-zoom to it."""
+        layer = self.layer_combo.currentLayer()
+        if not isinstance(layer, QgsVectorLayer) or self.current_index < 0:
+            return
+        fid = self.feature_ids[self.current_index]
+        feat = layer.getFeature(fid)
+        if not feat.isValid() or not feat.hasGeometry():
+            return
+        if self.auto_zoom_cb.isChecked():
+            self._zoom_to_feature(feat, layer)
+        try:
+            self.iface.mapCanvas().flashGeometries(
+                [feat.geometry()], layer.crs()
+            )
+        except AttributeError:
+            pass
 
     def _navigate_to_current(self):
         layer = self.layer_combo.currentLayer()
