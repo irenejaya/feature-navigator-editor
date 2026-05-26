@@ -1,0 +1,46 @@
+[general]
+name=FeatureNavEd
+qgisMinimumVersion=3.22
+qgisMaximumVersion=4.99
+description=Navigate and edit vector layer features one by one with attribute display, sorting, and auto-zoom. Dockable panel with previous/next navigation.
+about=FeatureNavEd is a dockable panel that lets you navigate and edit features of a vector layer one by one, similar to the Identify tool but with full navigation and editing control.
+    <br><br>
+    <b>Layer Selection</b> — Select a vector layer from the dropdown or drag-and-drop directly from the Layers panel. Supports all vector layer types (point, line, polygon).
+    <b>Feature Navigation</b> — Step through features with First, Previous, Next, and Last buttons. Sort features by any field in ascending or descending order. Each feature is automatically selected, zoomed to, and flashed on the map canvas.
+    <b>Attribute Form</b> — Displays the native QGIS attribute form for each feature. Supports inline editing when the layer is in edit mode.
+    <b>Multi-Edit</b> — Select 2 or more features while in edit mode to edit shared attribute values simultaneously via a native multi-edit form. When not in edit mode, a passive M(n) counter is shown in the navigation bar.
+    <b>Auto-zoom</b> — Configurable map scale control adjusts the zoom level when navigating between features.
+    <b>Pick from Map</b> — Click a feature on the map canvas to jump directly to it in the panel.
+    <br><br>
+    <b>Top Toolbar</b> — Quick-access icons for Pick from Map, Filter, Find, and Open Attribute Table.
+    <b>Find</b> — Search for features by field value with autocomplete dropdown, without filtering the navigation list.
+    <b>Filter</b> — Collapsible filter bar with expression-based filtering and selected-features-only mode.
+    <b>Sort Value Display</b> — The Sort By group title shows the current feature's sort field value for quick reference.
+
+version=1.0.5
+author=Irene Jaya
+email=irenejaya1@gmail.com
+tracker=https://github.com/irenejaya/feature-navigator-editor/issues
+repository=https://github.com/irenejaya/feature-navigator-editor
+homepage=https://github.com/irenejaya/feature-navigator-editor
+
+category=Vector
+tags=navigation,features,identify,inspector,browse,viewer,navigate,editor,attribute,form,dockable,pick
+
+icon=icon.svg
+
+experimental=False
+deprecated=False
+hasProcessingProvider=no
+server=False
+
+changelog=
+    1.0.5 - Multi-edit support, UI polish, and bug fixes
+        * Fix bugs and remove "Go to selected" advance option
+        * Multi-edit mode: select 2+ features while in edit mode to edit shared attribute values simultaneously via a multi-edit form
+        * Passive M(n) counter shown when 2+ features are selected outside of edit mode
+        * Delete feature button retained; duplicate feature button removed
+        * Group box titles (Layer, Sort By, Navigate) now displayed in bold
+        * Fixed: multi-edit form was non-interactive due to incorrect enum type passed to setMode()
+        * Fixed: flash button permanently greyed out after exiting multi-edit mode
+        * Fixed: selecting multiple features no longer auto-starts layer editing
