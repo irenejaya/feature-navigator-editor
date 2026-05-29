@@ -104,6 +104,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._multi_edit_mode = False        # True when ≥2 features selected + layer editable
         self._passive_multi_indicator = False # True when ≥2 selected but layer NOT editable
         self._multi_edit_rows = []            # [(field_idx, QgsField, QCheckBox, QLineEdit)]
+        self._form_saving = False             # True while we call form.save() internally
 
         self.setAllowedAreas(_AllDockAreas)
         self.setObjectName("FeatureNavEdDockWidget")
@@ -691,6 +692,10 @@ class FeatureNavEdDockWidget(QDockWidget):
                 old_layer.editingStopped.disconnect(self._update_edit_buttons)
             except Exception:
                 pass
+            try:
+                old_layer.attributeValueChanged.disconnect(self._on_attribute_value_changed)
+            except Exception:
+                pass
 
         # Layer changed — drop any cached form for the previous layer and
         # clear any locked selection (it belongs to that layer).
@@ -750,6 +755,10 @@ class FeatureNavEdDockWidget(QDockWidget):
                 pass
             try:
                 layer.editingStopped.connect(self._update_edit_buttons)
+            except Exception:
+                pass
+            try:
+                layer.attributeValueChanged.connect(self._on_attribute_value_changed)
             except Exception:
                 pass
         else:
@@ -990,7 +999,13 @@ class FeatureNavEdDockWidget(QDockWidget):
                 and self.feature_ids[self.current_index] == target_fid):
             return
         if target_fid not in self.feature_ids:
-            return
+            # Feature may have been created by an external operation (e.g. merge).
+            # Reload the feature list and try once more.
+            self._navigating_back = True
+            self._reload_features()
+            self._navigating_back = False
+            if target_fid not in self.feature_ids:
+                return
         self._push_history()
         self._accept_current_form()
         self.current_index = self.feature_ids.index(target_fid)
@@ -999,6 +1014,44 @@ class FeatureNavEdDockWidget(QDockWidget):
             self._navigate_to_current()
         finally:
             self._suppress_selection_jump = False
+
+    def _on_attribute_value_changed(self, fid, field_idx, value):
+        """Live-refresh the form when the current feature's attributes change externally.
+
+        Fires on every ``QgsVectorLayer.attributeValueChanged`` signal.  We
+        skip updates that we ourselves triggered (``_form_saving`` guard) to
+        avoid a feedback loop, and skip multi-edit
+        mode (its form handles its own state).  When an external operation
+        (e.g. QGIS Merge Selected Features, attribute-table edit, processing
+        tool) changes the displayed feature, we re-fetch it and call
+        ``form.setFeature()`` so the widgets reflect the new values immediately.
+        """
+        if self._form_saving:
+            return
+        if self._multi_edit_mode:
+            return
+        if (self.current_index < 0
+                or not self.feature_ids
+                or self.feature_ids[self.current_index] != fid):
+            return
+        layer = self.layer_combo.currentLayer()
+        if not isinstance(layer, QgsVectorLayer):
+            return
+        form = self._feature_form
+        if form is None or self._feature_form_layer_id != layer.id():
+            return
+        feat = layer.getFeature(fid)
+        if not feat.isValid():
+            return
+        # Set _form_saving so that any widget-change signals emitted by
+        # setFeature() don't re-enter this handler.
+        self._form_saving = True
+        try:
+            form.setFeature(feat)
+        except Exception:
+            pass
+        finally:
+            self._form_saving = False
 
     def _push_history(self):
         """Push the current feature position onto the navigation history stack."""
@@ -1383,9 +1436,12 @@ class FeatureNavEdDockWidget(QDockWidget):
                 return
 
         try:
+            self._form_saving = True
             ok = form.save()
         except Exception:
             ok = False
+        finally:
+            self._form_saving = False
 
         if ok:
             n_f = len(layer.selectedFeatureIds())
@@ -1472,9 +1528,12 @@ class FeatureNavEdDockWidget(QDockWidget):
         # via QgsVectorLayer.changeAttributeValue(), but the layer's edit
         # buffer is only persisted on the user's explicit "Save Edits".
         try:
+            self._form_saving = True
             form.save()
         except Exception:
             pass
+        finally:
+            self._form_saving = False
 
     def _remove_current_form(self):
         """Remove the current feature form widget from the layout.
@@ -1492,9 +1551,12 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._feature_form_layer_id = None
         if form is not None:
             try:
+                self._form_saving = True
                 form.save()
             except Exception:
                 pass
+            finally:
+                self._form_saving = False
         widget_to_remove = container if container is not None else form
         if widget_to_remove is None:
             return
@@ -1536,9 +1598,12 @@ class FeatureNavEdDockWidget(QDockWidget):
         if (self._feature_form is not None
                 and self._feature_form_layer_id == layer.id()):
             try:
+                self._form_saving = True
                 self._feature_form.save()  # commit any in-progress edits first
             except Exception:
                 pass
+            finally:
+                self._form_saving = False
             try:
                 self._feature_form.setFeature(feature)
                 self._form_placeholder.setVisible(False)
@@ -1580,20 +1645,6 @@ class FeatureNavEdDockWidget(QDockWidget):
                     break
                 except (TypeError, AttributeError):
                     continue
-
-            # As the user edits widgets, push values into the layer's edit
-            # buffer right away — same behaviour as the standard attribute
-            # form, so the 'Save Edits' action becomes enabled immediately
-            # rather than only after navigating to the next feature.
-            def _push_to_buffer(*_args):
-                try:
-                    form.save()
-                except Exception:
-                    pass
-            try:
-                form.attributeChanged.connect(_push_to_buffer)
-            except Exception:
-                pass
 
             # Wrap the form in a QScrollArea so layers with many fields can
             # scroll instead of being clipped by the dock's available height.
