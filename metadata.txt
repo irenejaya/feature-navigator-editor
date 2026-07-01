@@ -17,7 +17,7 @@ about=FeatureNavEd is a dockable panel that lets you navigate and edit features 
     <b>Filter</b> — Collapsible filter bar with expression-based filtering and selected-features-only mode.
     <b>Sort Value Display</b> — The Sort By group title shows the current feature's sort field value for quick reference.
 
-version=1.0.6
+version=1.0.8
 author=Irene Jaya
 email=irenejaya1@gmail.com
 tracker=https://github.com/irenejaya/feature-navigator-editor/issues
@@ -35,6 +35,7 @@ hasProcessingProvider=no
 server=False
 
 changelog=
+    1.0.8 - Shortcuts (Alt+Left/Right/Home/End/P/N) now work globally in QGIS regardless of which panel or layer has focus
     1.0.5 - Multi-edit support, UI polish, and bug fixes
         * Fix bugs and remove "Go to selected" advance option
         * Multi-edit mode: select 2+ features while in edit mode to edit shared attribute values simultaneously via a multi-edit form

@@ -12,8 +12,10 @@ try:
 except ImportError:
     _xml_fromstring = None
 
+import os
+
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QKeySequence
+from qgis.PyQt.QtGui import QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QCheckBox, QShortcut,
@@ -197,6 +199,22 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.filter_btn.setAutoRaise(True)
         self.filter_btn.setCheckable(True)
         toolbar_row.addWidget(self.filter_btn)
+
+        self.query_builder_btn = QToolButton()
+        try:
+            import db_manager as _dbm
+            _qb_icon_path = os.path.join(os.path.dirname(_dbm.__file__), 'icons', 'sql.gif')
+            _qb_icon = QIcon(_qb_icon_path) if os.path.exists(_qb_icon_path) else QgsApplication.getThemeIcon('/mActionOptions.svg')
+        except Exception:
+            _qb_icon = QgsApplication.getThemeIcon('/mActionOptions.svg')
+        self.query_builder_btn.setIcon(_qb_icon)
+        self.query_builder_btn.setToolTip(
+            "Query Builder — click to set a filter and see only matching features; "
+            "click again to clear the filter"
+        )
+        self.query_builder_btn.setAutoRaise(True)
+        self.query_builder_btn.setCheckable(True)
+        toolbar_row.addWidget(self.query_builder_btn)
 
         self.search_btn = QToolButton()
         self.search_btn.setIcon(
@@ -529,23 +547,26 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._main_layout.addWidget(self._multi_edit_buttons)
 
         # --- Keyboard shortcuts ---
-        _WidgetShortcut = (
-            getattr(Qt, 'WidgetWithChildrenShortcut', None)
-            or Qt.ShortcutContext.WidgetWithChildrenShortcut
+        # Use ApplicationShortcut so the shortcuts fire anywhere in QGIS,
+        # even when another layer / panel has focus (e.g. editing Layer B
+        # while Layer A is loaded in FeatureNavEd).
+        _AppShortcut = (
+            getattr(Qt, 'ApplicationShortcut', None)
+            or Qt.ShortcutContext.ApplicationShortcut
         )
         self._shortcut_prev = QShortcut(QKeySequence("Alt+Left"), main_widget)
-        self._shortcut_prev.setContext(_WidgetShortcut)
+        self._shortcut_prev.setContext(_AppShortcut)
         self._shortcut_next = QShortcut(QKeySequence("Alt+Right"), main_widget)
-        self._shortcut_next.setContext(_WidgetShortcut)
+        self._shortcut_next.setContext(_AppShortcut)
         self._shortcut_first = QShortcut(QKeySequence("Alt+Home"), main_widget)
-        self._shortcut_first.setContext(_WidgetShortcut)
+        self._shortcut_first.setContext(_AppShortcut)
         self._shortcut_last = QShortcut(QKeySequence("Alt+End"), main_widget)
-        self._shortcut_last.setContext(_WidgetShortcut)
+        self._shortcut_last.setContext(_AppShortcut)
         # Additional aliases / shortcuts
         self._shortcut_prev_alt = QShortcut(QKeySequence("Alt+P"), main_widget)
-        self._shortcut_prev_alt.setContext(_WidgetShortcut)
+        self._shortcut_prev_alt.setContext(_AppShortcut)
         self._shortcut_next_alt = QShortcut(QKeySequence("Alt+N"), main_widget)
-        self._shortcut_next_alt.setContext(_WidgetShortcut)
+        self._shortcut_next_alt.setContext(_AppShortcut)
 
         self.setWidget(main_widget)
 
@@ -559,6 +580,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.sort_field_combo.currentIndexChanged.connect(self._reload_features)
         self.sort_order_btn.clicked.connect(self._toggle_sort_order)
         self.filter_btn.toggled.connect(self._filter_bar.setVisible)
+        self.query_builder_btn.clicked.connect(self._toggle_query_builder)
         self.search_btn.toggled.connect(self._search_bar.setVisible)
         self.search_go_btn.clicked.connect(self._go_next_match)
         self.search_next_btn.clicked.connect(self._go_next_match)
@@ -1784,6 +1806,44 @@ class FeatureNavEdDockWidget(QDockWidget):
         layer = self.layer_combo.currentLayer()
         if isinstance(layer, QgsVectorLayer):
             self.iface.showAttributeTable(layer)
+
+    def _toggle_query_builder(self):
+        """On/off Query Builder filter.
+
+        Button OFF -> ON : open Query Builder dialog; if user clicks OK the
+                           filter is applied and the button stays checked.
+        Button ON  -> OFF: clear the filter immediately, no dialog.
+        """
+        layer = self.layer_combo.currentLayer()
+        if not isinstance(layer, QgsVectorLayer):
+            self.query_builder_btn.setChecked(False)
+            return
+
+        # Button was turned OFF -> clear the filter
+        if not self.query_builder_btn.isChecked():
+            layer.setSubsetString('')
+            self._reload_features()
+            return
+
+        # Button was turned ON -> open dialog so user can set a filter
+        try:
+            from qgis.gui import QgsQueryBuilder
+        except ImportError:
+            self.iface.messageBar().pushWarning(
+                "FeatureNavEd",
+                "QgsQueryBuilder is not available in this QGIS version."
+            )
+            self.query_builder_btn.setChecked(False)
+            return
+
+        dlg = QgsQueryBuilder(layer, self.iface.mainWindow())
+        dlg.setSql(layer.subsetString())
+        if dlg.exec():
+            # Filter applied successfully — keep button checked, refresh list
+            self._reload_features()
+        else:
+            # User cancelled — revert button to unchecked
+            self.query_builder_btn.setChecked(False)
 
     # =========================================================================
     # LOCK SELECTION  (filter from active selection)
