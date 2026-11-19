@@ -4,36 +4,42 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   qgis:
-    name: QGIS 3.34 (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    name: QGIS ${{ matrix.qgis }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.34: Qt5, close to the oldest supported release
+        # ltr:  current long-term release
+        # stable: latest release (QGIS 4, Qt6)
+        qgis: ["3.34", "ltr", "stable"]
+    # Official QGIS images: no apt install of QGIS on the runner.
+    container:
+      image: qgis/qgis:${{ matrix.qgis }}
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install QGIS and pytest
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Show versions
         run: |
-          # man-db triggers are slow on hosted runners and not needed here.
-          sudo rm -f /var/lib/man-db/auto-update
-          install_qgis() {
-            sudo apt-get update -o Acquire::Retries=5 &&
-            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
-              python3-qgis qgis-providers python3-pytest
+          python3 -c "from qgis.core import Qgis; print('QGIS', Qgis.version())"
+          python3 -c "from qgis.PyQt.QtCore import QT_VERSION_STR; print('Qt', QT_VERSION_STR)"
+
+      - name: Install pytest
+        run: |
+          python3 -c "import pytest" 2>/dev/null || {
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -o Acquire::Retries=3
+            apt-get install -y --no-install-recommends -o Acquire::Retries=3 python3-pytest
           }
-          for attempt in 1 2 3; do
-            install_qgis && exit 0
-            # The runner's Azure mirror is occasionally unreachable: fall back
-            # to the main Ubuntu archive for the next attempt.
-            echo "::warning::apt failed (attempt $attempt), retrying without the Azure mirror"
-            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt 2>/dev/null || true
-            sleep 15
-          done
-          exit 1
 
       - name: Run tests
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: /usr/bin/python3 -m pytest tests -v -p no:cacheprovider
+        run: python3 -m pytest tests -v -p no:cacheprovider

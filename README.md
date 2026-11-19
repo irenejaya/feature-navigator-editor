@@ -128,8 +128,9 @@ python3 -m pytest tests
 On Windows, run the same command from the **OSGeo4W Shell** (install pytest there first
 with `python -m pip install pytest`).
 
-GitHub Actions runs the suite on every push and pull request
-(`.github/workflows/tests.yml`, QGIS 3.34).
+GitHub Actions runs the suite on every push and pull request against the official
+QGIS Docker images: 3.34, the current LTR, and the latest release (QGIS 4 / Qt6)
+(`.github/workflows/tests.yml`).
 
 ---
 

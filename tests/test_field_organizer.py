@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """Field organizer: hide fields in the panel, per layer, saved in the project."""
 
-from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtTest import QTest
 from qgis.core import QgsField
 
 from featurenaved.compat import CHECKED, UNCHECKED, USER_ROLE
 from featurenaved.field_organizer import HIDDEN_FIELDS_PROPERTY, load_hidden_fields
-from helpers import multi_row, pump, type_text, visible_form_fields
+from helpers import field_type, multi_row, pump, type_text, visible_form_fields
 
 
 def open_organizer(dock):
@@ -97,7 +96,7 @@ def test_survives_fields_being_added(dock, parcels_gpkg):
     loaded(dock, layer)
     set_shown(open_organizer(dock), "PCL_FLOODED_AREA", False)
     layer.startEditing()
-    layer.addAttribute(QgsField("NEW_NOTE", QVariant.String))
+    layer.addAttribute(QgsField("NEW_NOTE", field_type("String")))
     pump()
     dock._go_first()
     pump()

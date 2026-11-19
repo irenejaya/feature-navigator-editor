@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Helpers shared by the tests."""
 
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QVariant
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QLabel, QLineEdit
 from qgis.gui import QgsEditorWidgetWrapper
@@ -49,3 +49,22 @@ def multi_row(dock, field_name):
 def set_sort(dock, field_name):
     dock.sort_field_combo.setCurrentIndex(dock.sort_field_combo.findData(field_name))
     pump()
+
+
+def field_type(name):
+    """Field type for QgsField on Qt5 (QVariant.Type) and Qt6 (QMetaType.Type).
+    ``name`` is the Qt5 spelling: 'String', 'Int', 'Double'."""
+    qt5 = getattr(QVariant, name, None)
+    if qt5 is not None:
+        return qt5
+    from qgis.PyQt.QtCore import QMetaType
+    return getattr(QMetaType.Type, {'String': 'QString'}.get(name, name))
+
+
+def polygon_wkb_type():
+    from qgis.core import Qgis
+    wkb = getattr(Qgis, 'WkbType', None)
+    if wkb is not None and hasattr(wkb, 'Polygon'):
+        return wkb.Polygon
+    from qgis.core import QgsWkbTypes
+    return QgsWkbTypes.Polygon

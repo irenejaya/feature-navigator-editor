@@ -55,13 +55,11 @@ from qgis.core import (  # noqa: E402
     QgsCoordinateReferenceSystem, QgsCoordinateTransformContext,
     QgsEditorWidgetSetup, QgsFeature, QgsField, QgsFields, QgsGeometry,
     QgsPointXY, QgsProject, QgsSettings, QgsVectorFileWriter, QgsVectorLayer,
-    QgsWkbTypes,
 )
 from qgis.gui import QgsGui, QgsMapCanvas, QgsMessageBar  # noqa: E402
-from qgis.PyQt.QtCore import QVariant  # noqa: E402
 from qgis.PyQt.QtWidgets import QMainWindow, QMessageBox  # noqa: E402
 
-from helpers import pump  # noqa: E402
+from helpers import field_type, polygon_wkb_type, pump  # noqa: E402
 
 QgsGui.editorWidgetRegistry().initEditors(None)
 
@@ -171,18 +169,18 @@ def parcels_gpkg(tmp_path):
     primary key, nullable integer, value-map text field, -999 doubles."""
     path = str(tmp_path / "parcels.gpkg")
     fields = QgsFields()
-    for name, field_type in (("PARCEL_VIEW_PFI", QVariant.String),
-                             ("PARCEL_MASTER_FID", QVariant.Int),
-                             ("LAND_USE_TYPE", QVariant.String),
-                             ("FL_1_PCT_MAX", QVariant.Double),
-                             ("FL_2_PCT", QVariant.Double),
-                             ("DEPTH_MAX_1_PCT", QVariant.Double),
-                             ("PCL_FLOODED_AREA", QVariant.Double)):
-        fields.append(QgsField(name, field_type))
+    for name, ftype in (("PARCEL_VIEW_PFI", field_type('String')),
+                        ("PARCEL_MASTER_FID", field_type('Int')),
+                        ("LAND_USE_TYPE", field_type('String')),
+                        ("FL_1_PCT_MAX", field_type('Double')),
+                        ("FL_2_PCT", field_type('Double')),
+                        ("DEPTH_MAX_1_PCT", field_type('Double')),
+                        ("PCL_FLOODED_AREA", field_type('Double'))):
+        fields.append(QgsField(name, ftype))
     options = QgsVectorFileWriter.SaveVectorOptions()
     options.driverName = "GPKG"
     writer = QgsVectorFileWriter.create(
-        path, fields, QgsWkbTypes.Polygon, QgsCoordinateReferenceSystem("EPSG:7855"),
+        path, fields, polygon_wkb_type(), QgsCoordinateReferenceSystem("EPSG:7855"),
         QgsCoordinateTransformContext(), options)
     for i in range(30):
         feat = QgsFeature(fields)

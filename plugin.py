@@ -7,7 +7,12 @@ Registers the dock widget and creates toolbar/menu entries.
 
 import os
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QAction, QDockWidget
+from qgis.PyQt.QtWidgets import QDockWidget
+
+try:
+    from qgis.PyQt.QtWidgets import QAction
+except ImportError:  # Qt6 moved QAction to QtGui
+    from qgis.PyQt.QtGui import QAction
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsApplication
 
