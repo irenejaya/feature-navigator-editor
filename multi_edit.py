@@ -48,6 +48,7 @@ class MultiEditPanel(QWidget):
         self._rows = []
         self._loading = False
         self._hidden_fields = set()
+        self._field_order = []
         self.fids = []
 
         outer = QVBoxLayout(self)
@@ -109,6 +110,11 @@ class MultiEditPanel(QWidget):
         self._layer_id = layer.id()
         self.fids = list(fids)
         self.refresh_baseline()
+
+    def set_field_order(self, names):
+        """Show rows in ``names`` order (empty = the layer's order)."""
+        self._field_order = list(names)
+        self._place_rows()
 
     def set_hidden_fields(self, names):
         """Hide rows for ``names`` (field names). A hidden field is never
@@ -319,12 +325,22 @@ class MultiEditPanel(QWidget):
                 row.checkbox.setToolTip(reason)
                 self._set_editor_enabled(row, False)
 
-            line = len(self._rows)
+            self._rows.append(row)
+        self._place_rows()
+        self._apply_hidden()
+
+    def _place_rows(self):
+        rank = {name: i for i, name in enumerate(self._field_order)}
+        rows = sorted(self._rows, key=lambda r: (0, rank[r.field_name])
+                      if r.field_name in rank else (1, r.idx))
+        for row in self._rows:
+            for widget in (row.checkbox, row.label, row.widget):
+                self._grid.removeWidget(widget)
+        for line, row in enumerate(rows):
             self._grid.addWidget(row.checkbox, line, 0)
             self._grid.addWidget(row.label, line, 1)
             self._grid.addWidget(row.widget, line, 2)
-            self._rows.append(row)
-        self._apply_hidden()
+        self._rows = rows
 
     def _create_editor(self, layer, idx, context):
         wrapper, widget = None, None

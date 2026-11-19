@@ -8,21 +8,23 @@ all behaviour lives in :mod:`.navigator_widget`.
 
 import os
 
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QGroupBox, QHBoxLayout, QLabel, QMenu,
-    QSpinBox, QVBoxLayout, QWidget, QWidgetAction,
+    QSpinBox, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
 from qgis.core import Qgis, QgsApplication, QgsMapLayerProxyModel
 from qgis.gui import QgsMapLayerComboBox
 
 from .compat import (
     ADJUST_TO_MIN_CONTENTS, ALIGN_CENTER, APP_SHORTCUT, INSTANT_POPUP,
-    LINKS_BY_MOUSE, RICH_TEXT, SUNKEN, VLINE, QShortcut,
+    LINKS_BY_MOUSE, RICH_TEXT, SUNKEN, TOOLTIP_ROLE, VLINE, QShortcut, qenum,
 )
 from .field_organizer import FieldOrganizer
 from .find_bar import FindBar
 from .multi_edit import MultiEditPanel
+from .review import ReviewStrip
 from .utils import tool_button
 
 
@@ -113,6 +115,13 @@ class NavigatorUiMixin:
             '/mActionArrowUp.svg', "Ascending — click to toggle")
         self.sort_order_btn.setIconSize(self.sort_order_btn.iconSize() * 1.2)
         sort_layout.addWidget(self.sort_order_btn)
+        # Shown only when sort values were edited since the list was built.
+        self.resort_btn = tool_button(
+            '/sort.svg',
+            "Sort values have changed since the list was built.\n"
+            "The order is kept so nothing moves while you work - click to re-sort.")
+        self.resort_btn.setVisible(False)
+        sort_layout.addWidget(self.resort_btn)
         self._sort_group.setLayout(sort_layout)
         self._main_layout.addWidget(self._sort_group)
 
@@ -145,6 +154,9 @@ class NavigatorUiMixin:
         nav_row.addWidget(self._counter_label)
         self.feature_total_label = QLabel("/ 0")
         nav_row.addWidget(self.feature_total_label)
+        self.seen_dot = QLabel("\u25cf")
+        self.seen_dot.setVisible(False)
+        nav_row.addWidget(self.seen_dot)
         nav_row.addStretch()
         self.next_btn = tool_button(
             '/mActionArrowRight.svg', "Next feature (Alt+Right / Alt+N)")
@@ -159,19 +171,43 @@ class NavigatorUiMixin:
             nav_row.addWidget(btn)
         nav_layout.addLayout(nav_row)
 
+        # --- Review progress ---
+        self.review_strip = ReviewStrip()
+        nav_layout.addWidget(self.review_strip)
+        self._review_row = QWidget()
+        review_layout = QHBoxLayout(self._review_row)
+        review_layout.setContentsMargins(0, 0, 0, 0)
+        review_layout.setSpacing(4)
+        self.visited_label = QLabel("Visited 0 / 0")
+        review_layout.addWidget(self.visited_label)
+        review_layout.addStretch()
+        self.next_unvisited_btn = QToolButton()
+        self.next_unvisited_btn.setText("Next unvisited")
+        self.next_unvisited_btn.setIcon(QgsApplication.getThemeIcon('/mActionArrowRight.svg'))
+        self.next_unvisited_btn.setToolButtonStyle(
+            qenum(Qt, 'ToolButtonStyle', 'ToolButtonTextBesideIcon'))
+        self.next_unvisited_btn.setAutoRaise(True)
+        self.next_unvisited_btn.setToolTip("Go to the next feature you haven't seen yet")
+        review_layout.addWidget(self.next_unvisited_btn)
+        nav_layout.addWidget(self._review_row)
+
         options_row = QHBoxLayout()
         self.auto_zoom_cb = QCheckBox("Auto-zoom")
         self.auto_zoom_cb.setChecked(True)
-        self.auto_zoom_cb.setToolTip("Centre on feature when navigating")
+        self.auto_zoom_cb.setToolTip("Move the map to the feature when navigating")
         options_row.addWidget(self.auto_zoom_cb)
-        self.auto_scale_cb = QCheckBox("Auto-scale")
-        self.auto_scale_cb.setChecked(True)
-        self.auto_scale_cb.setToolTip(
-            "Use current map canvas scale (uncheck to set a custom scale)")
-        options_row.addWidget(self.auto_scale_cb)
         options_row.addStretch()
-        self._scale_label = QLabel("Scale:")
-        options_row.addWidget(self._scale_label)
+        self.scale_mode_combo = QComboBox()
+        self.scale_mode_combo.addItem("Keep scale", "keep")
+        self.scale_mode_combo.addItem("Fit feature", "fit")
+        self.scale_mode_combo.addItem("Fixed scale", "fixed")
+        for i, tip in enumerate((
+                "Centre on the feature without changing the zoom",
+                "Zoom so the whole feature fits, with a margin",
+                "Centre on the feature at the scale in the box")):
+            self.scale_mode_combo.setItemData(i, tip, TOOLTIP_ROLE)
+        self.scale_mode_combo.setToolTip("How auto-zoom sets the map scale")
+        options_row.addWidget(self.scale_mode_combo)
         self.scale_spin = QSpinBox()
         self.scale_spin.setRange(100, 1000000)
         self.scale_spin.setValue(1000)
@@ -184,7 +220,7 @@ class NavigatorUiMixin:
         nav_layout.addLayout(options_row)
         self._nav_group.setLayout(nav_layout)
         self._main_layout.addWidget(self._nav_group)
-        self._update_scale_controls(self.auto_scale_cb.isChecked())
+        self._update_scale_controls()
 
         # --- Content: placeholder / single form (inserted later) / multi-edit
         self._form_placeholder = QLabel()
@@ -199,6 +235,16 @@ class NavigatorUiMixin:
         self._multi_panel = MultiEditPanel(self.iface)
         self._multi_panel.setVisible(False)
         self._main_layout.addWidget(self._multi_panel, 1)
+
+        self._measure_label = QLabel()
+        self._measure_label.setWordWrap(True)
+        self._measure_label.setStyleSheet("color: gray;")
+        self._measure_label.setTextInteractionFlags(
+            qenum(Qt, 'TextInteractionFlag', 'TextSelectableByMouse'))
+        self._measure_label.setToolTip(
+            "Measured with the project's ellipsoid and units (Project Properties)")
+        self._measure_label.setVisible(False)
+        self._main_layout.addWidget(self._measure_label)
 
         self._fields_hint = QLabel()
         self._fields_hint.setTextFormat(RICH_TEXT)
@@ -234,8 +280,12 @@ class NavigatorUiMixin:
             '/mActionUndo.svg', "Undo last edit on the navigated layer")
         self.redo_btn = tool_button(
             '/mActionRedo.svg', "Redo on the navigated layer")
+        self.revert_btn = tool_button(
+            '/mActionRollbackEdits.svg',
+            "Revert this feature: discard its unsaved changes\n"
+            "(a feature added in this editing session is removed)")
         for btn in (self.toggle_edit_btn, self.save_edits_btn,
-                    self.undo_btn, self.redo_btn):
+                    self.undo_btn, self.redo_btn, self.revert_btn):
             row.addWidget(btn)
 
         separator = QFrame()
@@ -295,9 +345,20 @@ class NavigatorUiMixin:
             "The Flash button still works on demand."
         )
         menu_layout.addWidget(self.enable_flash_cb)
+        self.track_visited_cb = QCheckBox("Track visited features")
+        self.track_visited_cb.setToolTip(
+            "Remember which features you have seen (saved with the project)\n"
+            "and show the progress strip and Next unvisited.")
+        menu_layout.addWidget(self.track_visited_cb)
+        self.show_measurements_cb = QCheckBox("Show measurements")
+        self.show_measurements_cb.setToolTip(
+            "Area, perimeter or length and vertex count under the form")
+        menu_layout.addWidget(self.show_measurements_cb)
         action = QWidgetAction(menu)
         action.setDefaultWidget(container)
         menu.addAction(action)
+        menu.addSeparator()
+        self.clear_visited_action = menu.addAction("Clear visited marks for this layer\u2026")
         self.settings_btn.setMenu(menu)
         row.addWidget(self.settings_btn)
 

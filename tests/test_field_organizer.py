@@ -3,6 +3,7 @@
 
 from qgis.PyQt.QtTest import QTest
 from qgis.core import QgsField
+from qgis.PyQt.QtWidgets import QLabel
 
 from featurenaved.compat import CHECKED, UNCHECKED, USER_ROLE
 from featurenaved.field_organizer import HIDDEN_FIELDS_PROPERTY, load_hidden_fields
@@ -127,3 +128,80 @@ def test_choice_is_per_layer_and_saved_on_the_layer(dock, iface, parcels_gpkg, m
         assert "PCL_FLOODED_AREA" not in visible_form_fields(second)
     finally:
         second.cleanup()
+
+
+# --- reordering -------------------------------------------------------------
+
+def move_to_top(organizer, name):
+    lw = organizer.list_widget
+    row = next(i for i in range(lw.count()) if lw.item(i).data(USER_ROLE) == name)
+    model = lw.model()
+    model.moveRow(model.index(0, 0).parent(), row, model.index(0, 0).parent(), 0)
+    pump()
+
+
+def form_order(dock):
+    labels = [(label.mapTo(dock._feature_form, label.rect().topLeft()).y(), label.text())
+              for label in dock._feature_form.findChildren(QLabel)
+              if label.isVisible() and label.buddy() is not None]
+    return [text for _, text in sorted(labels)]
+
+
+def test_dragging_reorders_form_and_multi_edit(dock, parcels_gpkg):
+    from featurenaved.field_organizer import FIELD_ORDER_PROPERTY
+    layer = parcels_gpkg
+    loaded(dock, layer)
+    organizer = open_organizer(dock)
+    move_to_top(organizer, "PCL_FLOODED_AREA")
+    assert form_order(dock)[0] == "PCL_FLOODED_AREA"
+    assert layer.customProperty(FIELD_ORDER_PROPERTY)[0] == "PCL_FLOODED_AREA"
+
+    dock._go_next()                                  # order survives navigation
+    assert form_order(dock)[0] == "PCL_FLOODED_AREA"
+
+    layer.startEditing()
+    layer.selectByIds(dock.feature_ids[:2])
+    pump()
+    assert dock._multi_panel._rows[0].field_name == "PCL_FLOODED_AREA"
+
+
+def test_reset_order(dock, parcels_gpkg):
+    from featurenaved.field_organizer import FIELD_ORDER_PROPERTY
+    layer = parcels_gpkg
+    loaded(dock, layer)
+    organizer = open_organizer(dock)
+    move_to_top(organizer, "PCL_FLOODED_AREA")
+    organizer.reset_order_btn.click()
+    pump()
+    assert form_order(dock)[:2] == ["fid", "PARCEL_VIEW_PFI"]
+    assert FIELD_ORDER_PROPERTY not in layer.customPropertyKeys()
+
+
+def test_order_and_hidden_fields_work_together(dock, parcels_gpkg):
+    loaded(dock, parcels_gpkg)
+    organizer = open_organizer(dock)
+    move_to_top(organizer, "FL_2_PCT")
+    set_shown(organizer, "fid", False)
+    assert form_order(dock)[:2] == ["FL_2_PCT", "PARCEL_VIEW_PFI"]
+
+
+def test_designed_forms_keep_their_order(dock, parcels_gpkg):
+    from qgis.core import (
+        Qgis, QgsAttributeEditorContainer, QgsAttributeEditorField, QgsEditFormConfig)
+    layer = parcels_gpkg
+    config = layer.editFormConfig()
+    form_layout = getattr(getattr(Qgis, 'AttributeFormLayout', None), 'DragAndDrop', None)
+    config.setLayout(form_layout if form_layout is not None else QgsEditFormConfig.TabLayout)
+    root = config.invisibleRootContainer()
+    root.clear()
+    tab = QgsAttributeEditorContainer("Main", root)
+    for idx, field in enumerate(layer.fields()):
+        tab.addChildElement(QgsAttributeEditorField(field.name(), idx, tab))
+    root.addChildElement(tab)
+    layer.setEditFormConfig(config)
+    loaded(dock, layer)
+    organizer = open_organizer(dock)
+    assert organizer.layout_note.isVisibleTo(organizer)
+    before = form_order(dock)
+    move_to_top(organizer, "PCL_FLOODED_AREA")
+    assert form_order(dock) == before                # designer's order kept

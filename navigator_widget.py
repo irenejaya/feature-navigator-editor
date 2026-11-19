@@ -44,10 +44,13 @@ from .compat import (
     form_mode, message_level,
 )
 from .field_organizer import (
-    apply_to_attribute_form, load_hidden_fields, organizable_fields,
-    save_hidden_fields,
+    apply_field_order, apply_to_attribute_form, load_field_order,
+    load_hidden_fields, organizable_fields, save_field_order, save_hidden_fields,
+    uses_generated_layout,
 )
+from .measurements import describe_geometry
 from .navigator_ui import NavigatorUiMixin
+from .review import VisitedStore
 from .utils import feature_exists, grey, is_null, make_scroll_area, values_equal
 
 _LOCK_HIGHLIGHT_COLOR = QColor(255, 128, 0)
@@ -98,7 +101,13 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._highlight = None
         self._suppress_selection = False   # True while we select features
 
+        self._sort_keys = {}               # fid -> sort value when the list was built
+        self._stale_sort = set()           # fids whose sort value changed since
+        self._visited = VisitedStore()     # review tracking, saved on the layer
+        self._seen_before = False          # current feature was visited before
+        self._measure_text = ""
         self._hidden_fields = set()        # field names hidden in the panel
+        self._field_order = []             # user's field order (empty = layer's)
         self._field_counts = (0, 0)        # (shown, total) for the hint
         self._content_mode = 'placeholder'
 
@@ -108,7 +117,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._pending_full_reload = False
         self._structure_timer = self._single_shot(self._process_structure_changes)
         self._refresh_timer = self._single_shot(self._refresh_from_layer)
-        self._field_visibility_timer = self._single_shot(self._apply_field_visibility)
+        self._field_visibility_timer = self._single_shot(self._apply_field_view)
 
         self.setAllowedAreas(ALL_DOCK_AREAS)
         self.setObjectName("FeatureNavEdDockWidget")
@@ -190,12 +199,14 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self.save_edits_btn.clicked.connect(self._save_edits)
         self.undo_btn.clicked.connect(self._undo)
         self.redo_btn.clicked.connect(self._redo)
+        self.revert_btn.clicked.connect(self._revert_current_feature)
+        self.resort_btn.clicked.connect(self._reload_features)
         self.query_builder_btn.clicked.connect(self._toggle_query_builder)
         self.search_btn.toggled.connect(self._on_search_toggled)
         self._find_bar.findRequested.connect(self._find_match)
         self._fields_menu.aboutToShow.connect(self._refresh_field_organizer)
         self._fields_menu.aboutToHide.connect(self._update_fields_indicator)
-        self._field_organizer.changed.connect(self._on_field_visibility_changed)
+        self._field_organizer.changed.connect(self._on_organizer_changed)
         self._fields_hint.linkActivated.connect(self._on_fields_hint_link)
 
         self.first_btn.clicked.connect(self._go_first)
@@ -206,13 +217,17 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self.flash_btn.clicked.connect(self._flash_current)
         self.del_btn.clicked.connect(self._delete_current_feature)
         self._form_placeholder.linkActivated.connect(self._on_placeholder_link)
+        self.review_strip.jumpRequested.connect(self._go_to_index)
+        self.next_unvisited_btn.clicked.connect(self._go_next_unvisited)
 
-        self.auto_scale_cb.toggled.connect(self._update_scale_controls)
+        self.scale_mode_combo.currentIndexChanged.connect(self._on_scale_mode_changed)
         self.iface.mapCanvas().scaleChanged.connect(self._on_canvas_scale_changed)
 
         self.lock_nav_cb.toggled.connect(self._on_lock_navigation_toggled)
+        self.track_visited_cb.toggled.connect(self._on_track_visited_toggled)
+        self.show_measurements_cb.toggled.connect(self._on_show_measurements_toggled)
+        self.clear_visited_action.triggered.connect(self._clear_visited)
         self.auto_zoom_cb.toggled.connect(self._save_settings)
-        self.auto_scale_cb.toggled.connect(self._save_settings)
         self.enable_flash_cb.toggled.connect(self._save_settings)
         self.scale_spin.valueChanged.connect(self._save_settings)
 
@@ -317,8 +332,14 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._last_index = -1
         self._passive_count = 0
         self._form_error = None
+        self._seen_before = False
+        self._stale_sort = set()
+        self._sort_keys = {}
+        self._visited.load(layer)
         self._hidden_fields = load_hidden_fields(layer)
+        self._field_order = load_field_order(layer)
         self._multi_panel.set_hidden_fields(self._hidden_fields)
+        self._multi_panel.set_field_order(self._field_order)
         self._recount_fields()
 
         self._populate_sort_combo(
@@ -414,6 +435,10 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._pending_deleted.clear()
         self._pending_full_reload = False
         self._hidden_fields = set()
+        self._field_order = []
+        self._sort_keys = {}
+        self._stale_sort = set()
+        self._visited.load(None)
         self._recount_fields()
         self._find_bar.set_layer(None)
         self._update_display()
@@ -431,7 +456,8 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         if self._multi_edit_mode:
             self._multi_panel.set_target(
                 layer, layer.selectedFeatureIds(), force_rebuild=True)
-        # The native form rebuilds its widgets after this signal; re-hide.
+        # The native form rebuilds its widgets after this signal: re-apply
+        # our field order and hidden fields once it has.
         self._field_visibility_timer.start()
 
     # =========================================================================
@@ -461,10 +487,11 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             return min(self._last_index, len(self.feature_ids) - 1)
         return -1
 
-    def _query_feature_ids(self):
+    def _fetch_sort_values(self):
+        """``{fid: sort value}`` for every feature (None for NULL)."""
         layer = self._layer
         if layer is None:
-            return []
+            return {}
         sort_field = self.sort_field_combo.currentData()
         if sort_field and layer.fields().indexOf(sort_field) < 0:
             sort_field = None
@@ -474,26 +501,63 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         else:
             request.setNoAttributes()
         request.setFlags(NO_GEOMETRY)
-
-        values, nulls = [], []
+        values = {}
         for feat in layer.getFeatures(request):
-            fid = feat.id()
             if sort_field:
                 value = feat[sort_field]
-                if is_null(value):
-                    nulls.append(fid)
-                else:
-                    values.append((value, fid))
+                values[feat.id()] = None if is_null(value) else value
             else:
-                values.append((fid, fid))
+                values[feat.id()] = feat.id()
+        return values
+
+    def _sorted_ids(self, keys):
+        values = [(value, fid) for fid, value in keys.items() if value is not None]
+        nulls = sorted(fid for fid, value in keys.items() if value is None)
         reverse = not self.sort_ascending
         try:
             values.sort(reverse=reverse)
         except TypeError:
             values.sort(key=lambda e: (str(e[0]), e[1]), reverse=reverse)
-        nulls.sort()
         # NULLs always go last, whatever the direction.
         return [fid for _, fid in values] + nulls
+
+    def _query_feature_ids(self):
+        """Fresh, sorted list. This is the only place the order is decided
+        from current values (layer load, sort change, reload / re-sort)."""
+        self._sort_keys = self._fetch_sort_values()
+        self._stale_sort = set()
+        self._update_resort_button()
+        return self._sorted_ids(self._sort_keys)
+
+    def _merge_feature_ids(self):
+        """Pick up added / restored features without reordering anything.
+
+        Every feature keeps the sort value it had when the list was built,
+        so edits never move it and an undone delete returns to exactly the
+        same place. Only features we have never seen use their current value.
+        """
+        current = self._fetch_sort_values()
+        for fid, value in current.items():
+            self._sort_keys.setdefault(fid, value)
+        self._stale_sort &= set(current)
+        self._update_resort_button()
+        return self._sorted_ids({fid: self._sort_keys[fid] for fid in current})
+
+    def _track_sort_change(self, fid, idx, value):
+        sort_field = self.sort_field_combo.currentData()
+        layer = self._layer
+        if not sort_field or layer is None or fid not in self._sort_keys:
+            return
+        if layer.fields().indexOf(sort_field) != idx:
+            return
+        if values_equal(None if is_null(value) else value, self._sort_keys[fid]):
+            self._stale_sort.discard(fid)
+        else:
+            self._stale_sort.add(fid)
+        self._update_resort_button()
+
+    def _update_resort_button(self):
+        self.resort_btn.setVisible(bool(self._stale_sort))
 
     def _reload_features(self, *args):
         """Rebuild the list (sort/filter change), keeping the current feature."""
@@ -563,10 +627,17 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         remap, self._fid_remap = self._fid_remap, {}
         if self._last_fid in remap:
             self._last_fid = remap[self._last_fid]
+        for old, new in remap.items():
+            if old in self._sort_keys:
+                self._sort_keys.setdefault(new, self._sort_keys[old])
+            if old in self._visited:
+                self._visited.mark(new)
         if full:
-            self.feature_ids = self._query_feature_ids()
+            self.feature_ids = self._merge_feature_ids()
         elif deleted:
             self.feature_ids = [f for f in self.feature_ids if f not in deleted]
+            self._stale_sort -= deleted
+            self._update_resort_button()
         else:
             return
 
@@ -612,6 +683,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         if feat.isValid():
             self._show_feature_form(layer, feat, save_pending=False)
             self._update_highlight(feat)
+        self._update_measurements(feat)
         self._update_display()
 
     def _on_before_commit_changes(self, *args):
@@ -650,7 +722,8 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                 self._fid_remap[snapshot.id()] = feat.id()
                 return
 
-    def _on_attribute_value_changed(self, fid, *args):
+    def _on_attribute_value_changed(self, fid, idx=None, value=None, *args):
+        self._track_sort_change(fid, idx, value)
         if self._form_saving:
             return
         if self._multi_edit_mode:
@@ -683,11 +756,17 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             self._form_saving = False
         if self._hidden_fields:
             apply_to_attribute_form(form, layer, self._hidden_fields)
-        self._update_sort_value()
+        self._update_measurements(feat)
+        self._update_display()
 
     def _on_geometry_changed(self, fid, *args):
-        if fid == self._current_fid() and self._highlight is not None:
+        if fid != self._current_fid():
+            return
+        if self._highlight is not None:
             self._update_highlight()
+        self._update_measurements()
+        self._update_content()
+        self._update_toolbar_state()
 
     def _on_subset_changed(self, *args):
         self._reload_features()
@@ -762,6 +841,9 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
 
         self._last_fid = fid
         self._last_index = self.current_index
+        self._seen_before = fid in self._visited
+        if self.track_visited_cb.isChecked():
+            self._visited.mark(fid)
         if select:
             self._select_only(layer, fid)
             self._passive_count = 0
@@ -772,6 +854,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                 self._flash_geometry(feat, layer)
         self._show_feature_form(layer, feat, save_pending)
         self._update_highlight(feat)
+        self._update_measurements(feat)
         self._update_display()
 
     def _select_only(self, layer, fid):
@@ -783,18 +866,35 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         finally:
             self._suppress_selection = False
 
+    def _scale_mode(self):
+        return self.scale_mode_combo.currentData() or 'keep'
+
     def _zoom_to_feature(self, feature, layer):
         geom = feature.geometry()
         if geom is None or geom.isEmpty():
             return
         canvas = self.iface.mapCanvas()
+        settings = canvas.mapSettings()
+        mode = self._scale_mode()
+        if mode == 'fit':
+            try:
+                extent = settings.layerExtentToOutputExtent(layer, geom.boundingBox())
+            except Exception:
+                extent = None
+            if extent is not None and (extent.width() > 0 or extent.height() > 0):
+                if extent.width() == 0 or extent.height() == 0:   # straight line
+                    extent.grow(max(extent.width(), extent.height()) * 0.1)
+                extent.scale(1.2)                                   # margin
+                canvas.setExtent(extent)
+                canvas.refresh()
+                return
+            # A single point has no extent: centre it at the current scale.
         try:
-            center = canvas.mapSettings().layerToMapCoordinates(
-                layer, geom.centroid().asPoint())
+            center = settings.layerToMapCoordinates(layer, geom.centroid().asPoint())
         except Exception:
             return
         canvas.setCenter(center)
-        if not self.auto_scale_cb.isChecked():
+        if mode == 'fixed':
             canvas.zoomScale(self.scale_spin.value())
         canvas.refresh()
 
@@ -816,14 +916,21 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             self._zoom_to_feature(feat, layer)
         self._flash_geometry(feat, layer)
 
-    def _update_scale_controls(self, checked):
-        self._scale_label.setEnabled(not checked)
-        self.scale_spin.setEnabled(not checked)
-        if checked:
+    def _update_scale_controls(self, *args):
+        fixed = self._scale_mode() == 'fixed'
+        self.scale_spin.setEnabled(fixed)
+        self.scale_spin.setToolTip(
+            "Map scale used by auto-zoom" if fixed else
+            "Current map scale (choose Fixed scale to set your own)")
+        if not fixed:
             self._sync_scale_from_canvas()
 
+    def _on_scale_mode_changed(self, *args):
+        self._update_scale_controls()
+        self._save_settings()
+
     def _on_canvas_scale_changed(self, scale):
-        if self.auto_scale_cb.isChecked():
+        if self._scale_mode() != 'fixed':
             self.scale_spin.blockSignals(True)
             self.scale_spin.setValue(round(scale))
             self.scale_spin.blockSignals(False)
@@ -879,7 +986,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             self._flush_structure_changes()
             idx = self._index_of(target)
         if idx < 0:
-            self.feature_ids = self._query_feature_ids()
+            self.feature_ids = self._merge_feature_ids()
             idx = self._index_of(target)
             if idx < 0:          # e.g. hidden by the layer filter
                 self._enter_na_state()
@@ -1009,23 +1116,31 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
     # =========================================================================
 
     def _refresh_field_organizer(self):
+        layer = self._layer
         self._field_organizer.set_fields(
-            organizable_fields(self._layer), self._hidden_fields)
+            organizable_fields(layer), self._hidden_fields, self._field_order,
+            designed_form=layer is not None and not uses_generated_layout(layer))
 
-    def _on_field_visibility_changed(self):
-        if self._layer is None:
+    def _on_organizer_changed(self):
+        layer = self._layer
+        if layer is None:
             return
         self._hidden_fields = self._field_organizer.hidden_fields()
-        save_hidden_fields(self._layer, self._hidden_fields)
+        save_hidden_fields(layer, self._hidden_fields)
+        save_field_order(layer, self._field_organizer.field_order())
+        self._field_order = load_field_order(layer)
         self._recount_fields()
-        self._apply_field_visibility()
+        self._apply_field_view()
 
-    def _apply_field_visibility(self):
+    def _apply_field_view(self):
+        """Apply field order and hidden fields to the form and multi-edit."""
         layer = self._layer
         if layer is not None:
             if (self._feature_form is not None
                     and self._feature_form_layer_id == layer.id()):
+                apply_field_order(self._feature_form, layer, self._field_order)
                 apply_to_attribute_form(self._feature_form, layer, self._hidden_fields)
+            self._multi_panel.set_field_order(self._field_order)
             self._multi_panel.set_hidden_fields(self._hidden_fields)
         self._update_fields_indicator()
 
@@ -1060,6 +1175,209 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
     # =========================================================================
     # EDITING TOOLBAR
     # =========================================================================
+
+    def _original_feature(self, layer, fid):
+        """The feature as last saved (straight from the data provider)."""
+        request = QgsFeatureRequest().setFilterFid(fid)
+        for feat in layer.dataProvider().getFeatures(request):
+            return feat if feat.isValid() else None
+        return None
+
+    def _current_unsaved_state(self):
+        """'added', 'changed' or None for the current feature.
+
+        QGIS keeps a feature flagged as changed even after a value is set
+        back to what was saved, so changes are compared with the saved
+        feature instead of trusting the flag.
+        """
+        layer = self._layer
+        fid = self._current_fid()
+        if (layer is None or fid is None or self._multi_edit_mode
+                or not layer.isEditable()):
+            return None
+        buffer = layer.editBuffer()
+        if buffer is None:
+            return None
+        try:
+            if buffer.isFeatureAdded(fid):
+                return 'added'
+            attributes_changed = buffer.isFeatureAttributesChanged(fid)
+            geometry_changed = buffer.isFeatureGeometryChanged(fid)
+        except Exception:
+            return None
+        if self._form_dirty:
+            return 'changed'
+        if not (attributes_changed or geometry_changed):
+            return None
+        original = self._original_feature(layer, fid)
+        if original is None:
+            return 'changed'
+        current = layer.getFeature(fid)
+        fields = layer.fields()
+        if attributes_changed:
+            for idx in buffer.changedAttributeValues().get(fid, {}):
+                source = fields.fieldOriginIndex(idx)
+                if (0 <= source < len(original.attributes()) and not values_equal(
+                        current.attribute(idx), original.attribute(source))):
+                    return 'changed'
+        if geometry_changed and not _same_geometry(current, original):
+            return 'changed'
+        return None
+
+    def _revert_current_feature(self):
+        """Discard unsaved changes to the current feature only (one undo step).
+        A feature added in this editing session is removed, just like
+        discarding all unsaved edits would."""
+        layer = self._layer
+        fid = self._current_fid()
+        state = self._current_unsaved_state()
+        if state is None:
+            return
+        if state == 'added':
+            text = (f"Feature {fid} was added in this editing session.\n\n"
+                    "Reverting removes it, as discarding unsaved edits would.")
+        else:
+            text = f"Discard the unsaved changes to feature {fid}?"
+        reply = QMessageBox.question(self, "Revert Feature", text + "\n\nYou can Undo this.",
+                                     MB_YES | MB_NO, MB_NO)
+        if reply != MB_YES:
+            return
+        self._set_form_dirty(False)
+        if state == 'added':
+            layer.beginEditCommand(f"FeatureNavEd: revert feature {fid}")
+            if layer.deleteFeature(fid):
+                layer.endEditCommand()
+                layer.triggerRepaint()
+                self._pending_deleted.add(fid)
+                self._flush_structure_changes()
+            else:
+                layer.destroyEditCommand()
+                self._notify(f"Could not revert feature {fid}.", "warning")
+            return
+
+        buffer = layer.editBuffer()
+        original = self._original_feature(layer, fid)
+        current = layer.getFeature(fid)
+        fields = layer.fields()
+        attribute_changes = {}
+        if original is not None:
+            for idx in buffer.changedAttributeValues().get(fid, {}):
+                source = fields.fieldOriginIndex(idx)
+                if 0 <= source < len(original.attributes()):
+                    value = original.attribute(source)
+                    if not values_equal(current.attribute(idx), value):
+                        attribute_changes[idx] = value
+        geometry = None
+        if (original is not None and buffer.isFeatureGeometryChanged(fid)
+                and not _same_geometry(current, original)):
+            geometry = original.geometry()
+        if attribute_changes or geometry is not None:
+            layer.beginEditCommand(f"FeatureNavEd: revert feature {fid}")
+            ok = True
+            for idx, value in attribute_changes.items():
+                ok = layer.changeAttributeValue(fid, idx, value) and ok
+            if geometry is not None:
+                ok = layer.changeGeometry(fid, geometry) and ok
+            if ok:
+                layer.endEditCommand()
+            else:
+                layer.destroyEditCommand()
+                self._notify(f"Could not revert feature {fid}.", "warning")
+            layer.triggerRepaint()
+        # Show the saved values (this also drops anything typed but unsaved).
+        feat = layer.getFeature(fid)
+        if self._feature_form is not None and feat.isValid():
+            self._form_saving = True
+            try:
+                self._feature_form.setFeature(feat)
+            finally:
+                self._form_saving = False
+            self._set_form_dirty(False)
+            if self._hidden_fields:
+                apply_to_attribute_form(self._feature_form, layer, self._hidden_fields)
+        self._update_highlight(feat)
+        self._update_measurements(feat)
+        self._update_display()
+
+    # --- review tracking ----------------------------------------------------
+
+    def _go_next_unvisited(self):
+        self._flush_structure_changes()
+        if self._multi_edit_mode or not self.feature_ids:
+            return
+        total = len(self.feature_ids)
+        start = self.current_index if self.current_index >= 0 else self._anchor_index()
+        for offset in range(1, total + 1):
+            idx = (start + offset) % total
+            if self.feature_ids[idx] not in self._visited:
+                self._go_to_index(idx)
+                return
+        self._notify(f"All {total} features have been visited.", "success")
+
+    def _clear_visited(self, *args):
+        layer = self._layer
+        if layer is None:
+            return
+        reply = QMessageBox.question(
+            self, "Clear Visited Marks",
+            f"Forget which features of \"{layer.name()}\" you have visited?",
+            MB_YES | MB_NO, MB_NO)
+        if reply != MB_YES:
+            return
+        self._visited.clear()
+        self._seen_before = False
+        self._update_display()
+
+    def _on_track_visited_toggled(self, checked):
+        self._save_settings()
+        if checked and self._current_fid() is not None:
+            self._visited.mark(self._current_fid())
+        self._update_display()
+
+    def _update_review(self):
+        tracking = self.track_visited_cb.isChecked() and self._layer is not None
+        self.review_strip.setVisible(tracking)
+        self._review_row.setVisible(tracking)
+        if not tracking:
+            self.seen_dot.setVisible(False)
+            return
+        visited = self._visited.ids
+        flags = [fid in visited for fid in self.feature_ids]
+        current = self.current_index if self.current_index >= 0 else self._anchor_index()
+        self.review_strip.set_state(flags, current)
+        done = sum(flags)
+        self.visited_label.setText(f"Visited {done} / {len(flags)}")
+        self.next_unvisited_btn.setEnabled(
+            not self._multi_edit_mode and 0 < len(flags) and done < len(flags))
+        show_dot = (self._current_fid() is not None and not self._multi_edit_mode
+                    and self._passive_count < 2)
+        self.seen_dot.setVisible(show_dot)
+        if show_dot:
+            color = "#2ea043" if self._seen_before else "gray"
+            self.seen_dot.setStyleSheet(f"color: {color};")
+            self.seen_dot.setToolTip("Seen before" if self._seen_before else "First visit")
+
+    # --- measurements -------------------------------------------------------
+
+    def _update_measurements(self, feat=None):
+        layer = self._layer
+        fid = self._current_fid()
+        text = ""
+        if (self.show_measurements_cb.isChecked() and layer is not None
+                and fid is not None and not self._multi_edit_mode):
+            if feat is None or not feat.isValid() or feat.id() != fid:
+                feat = layer.getFeature(fid)
+            if feat.isValid() and feat.hasGeometry():
+                try:
+                    text = describe_geometry(layer, feat.geometry())
+                except Exception:
+                    text = ""
+        self._measure_text = text
+
+    def _on_show_measurements_toggled(self, *args):
+        self._save_settings()
+        self._update_measurements()
+        self._update_content()
 
     def _layer_tools(self):
         try:
@@ -1170,6 +1488,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         has_feature = self._current_fid() is not None and not self._multi_edit_mode
         self.flash_btn.setEnabled(has_feature)
         self.del_btn.setEnabled(editable and has_feature)
+        self.revert_btn.setEnabled(self._current_unsaved_state() is not None)
 
     # =========================================================================
     # QUERY BUILDER
@@ -1366,6 +1685,8 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                     form.setMode(mode)
                 except (TypeError, AttributeError):
                     pass
+            if self._field_order:
+                apply_field_order(form, layer, self._field_order)
             if self._hidden_fields:
                 apply_to_attribute_form(form, layer, self._hidden_fields)
             scroll = make_scroll_area(form, SCROLL_AS_NEEDED)
@@ -1422,6 +1743,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self.feature_spin.setEnabled(can_nav)
 
         self._update_content()
+        self._update_review()
         self._update_sort_value()
         self._update_toolbar_state()
 
@@ -1446,6 +1768,8 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         if self._feature_form_container is not None:
             self._feature_form_container.setVisible(mode == 'form')
         self._form_placeholder.setVisible(mode == 'placeholder')
+        self._measure_label.setText(self._measure_text)
+        self._measure_label.setVisible(mode == 'form' and bool(self._measure_text))
         self._update_fields_indicator()
 
     def _placeholder_text(self):
@@ -1499,9 +1823,12 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             s = QgsSettings()
             p = self._SETTINGS_PREFIX
             s.setValue(f"{p}/auto_zoom", bool(self.auto_zoom_cb.isChecked()))
-            s.setValue(f"{p}/auto_scale", bool(self.auto_scale_cb.isChecked()))
+            s.setValue(f"{p}/scale_mode", self._scale_mode())
             s.setValue(f"{p}/enable_flash", bool(self.enable_flash_cb.isChecked()))
             s.setValue(f"{p}/lock_navigation", bool(self.lock_nav_cb.isChecked()))
+            s.setValue(f"{p}/track_visited", bool(self.track_visited_cb.isChecked()))
+            s.setValue(f"{p}/show_measurements",
+                       bool(self.show_measurements_cb.isChecked()))
             s.setValue(f"{p}/scale", int(self.scale_spin.value()))
             s.setValue(f"{p}/sort_ascending", bool(self.sort_ascending))
         except Exception:
@@ -1528,19 +1855,28 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                 return default
 
         for checkbox, key, default in ((self.auto_zoom_cb, "auto_zoom", True),
-                                       (self.auto_scale_cb, "auto_scale", True),
                                        (self.enable_flash_cb, "enable_flash", False),
-                                       (self.lock_nav_cb, "lock_navigation", False)):
+                                       (self.lock_nav_cb, "lock_navigation", False),
+                                       (self.track_visited_cb, "track_visited", True),
+                                       (self.show_measurements_cb, "show_measurements", True)):
             checkbox.blockSignals(True)
             checkbox.setChecked(_b(key, default))
             checkbox.blockSignals(False)
         self._lock_navigation = self.lock_nav_cb.isChecked()
         self._update_nav_title()
-        self._update_scale_controls(self.auto_scale_cb.isChecked())
+
+        # 1.0.x stored a Keep/Fixed choice as the "Auto-scale" tick box.
+        mode = s.value(f"{self._SETTINGS_PREFIX}/scale_mode", "")
+        if mode not in ("keep", "fit", "fixed"):
+            mode = "keep" if _b("auto_scale", True) else "fixed"
+        self.scale_mode_combo.blockSignals(True)
+        self.scale_mode_combo.setCurrentIndex(max(0, self.scale_mode_combo.findData(mode)))
+        self.scale_mode_combo.blockSignals(False)
 
         self.scale_spin.blockSignals(True)
         self.scale_spin.setValue(_i("scale", self.scale_spin.value()))
         self.scale_spin.blockSignals(False)
+        self._update_scale_controls()
 
         self.sort_ascending = _b("sort_ascending", True)
         self._update_sort_button()

@@ -16,10 +16,18 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 ### Feature Navigation
 - Step through features with **First**, **Previous**, **Next**, and **Last** buttons (or `Alt+←/→/Home/End`)
 - Sort features by any attribute field, ascending or descending — the current feature stays put when you change the sort, and the sort field is remembered per layer
+- **Stable order** — the order is fixed when you load the layer, change the sort or click reload. Deleting removes a feature in place, Undo puts it back exactly where it was, new features slot into their sorted position, and editing values never moves anything. If you change a value of the sort field, a **re-sort** button appears next to the sort direction; nothing moves until you click it
 - **Sort field value** — displays the current feature's sort field value at the top for quick reference
 - Each navigated feature is automatically **selected** and **zoomed to** (flash is optional)
 - Selecting a feature on the map jumps the navigator to it; clearing the selection shows a **Return to feature N** link, and Next/Previous continue from where you were
 - Feature counter shows current position (e.g. `3 / 150`)
+
+### Review Progress
+- Every feature you open is marked **visited** — no extra field to fill in
+- A green dot next to the counter means you have seen this feature before
+- A thin **progress strip** shows the whole list (green = visited, grey = not yet) so skipped ranges stand out; click it to jump there
+- **Visited 120 / 434** and a **Next unvisited** button take you to the next feature you haven't looked at
+- Saved per layer with the project, so you can pick up tomorrow; clear it from **Settings → Clear visited marks**, or turn it off with **Settings → Track visited features**
 
 ### Lock Navigation
 - Turn on **Settings → Lock navigation** to keep the navigator on its feature while you click, select or edit other things on the map
@@ -39,6 +47,7 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 
 ### Editing Toolbar
 - **Toggle editing**, **Save edits**, **Undo** and **Redo** for the navigated layer — no need to make it the active layer first
+- **Revert this feature** discards the unsaved changes of just the feature on screen (values, geometry, anything still being typed), like discarding edits for that one feature. A feature added in this editing session is removed. One Undo brings the changes back
 
 ### Always in Sync
 - Deleting the current feature — with the panel's Delete button, the `Del` key or from the attribute table — removes it from the list and moves to the next feature
@@ -46,7 +55,9 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 
 ### Field Organizer
 - Click the **eye** button to choose which fields the panel shows — handy for layers with dozens of fields when you only need a few
+- **Drag fields to reorder** them; **Reset order** goes back to the layer's own order
 - Filter the list by name, and use **Show all** / **Hide all** on the filtered fields (e.g. filter `DEPTH`, then Hide all)
+- Reordering works on the standard (auto-generated) form and in multi-edit; layers with a form built in the drag-and-drop designer keep the designer's order in the single-feature view
 - Applies to both the single-feature form and multi-edit; a hidden field is never written by multi-edit
 - Remembered per layer and saved with the project; the layer's own form, attribute table and identify results are not affected
 - A "Showing 12 of 40 fields · Change" line under the form reminds you that some fields are hidden
@@ -55,10 +66,12 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 - **Query Builder** filters the layer so you only navigate matching features; click again to clear
 - **Find** jumps to the next/previous feature with a given field value (with autocomplete), without filtering
 
-### Auto-zoom & Scale Control
-- **Auto-zoom** — centres the map on the current feature when navigating
-- **Auto-scale** — keeps the current map canvas scale (live-synced); uncheck to set a custom scale
-- Adjustable map scale (e.g. `1:500`, `1:5000`) when auto-scale is off
+### Auto-zoom, Scale & Measurements
+- **Auto-zoom** moves the map to the current feature when navigating, using the scale dropdown:
+  - **Keep scale** — centre on the feature without changing the zoom
+  - **Fit feature** — zoom so the whole feature fits, with a margin
+  - **Fixed scale** — centre at the scale you type (e.g. `1:500`)
+- **Measurements** under the form: area and perimeter (polygons), length (lines), vertex count, or X/Y (points), using the project's ellipsoid and units — like the Identify tool's *Derived* section. Turn off with **Settings → Show measurements**
 
 ---
 
@@ -87,7 +100,8 @@ Copy the `featurenaved` folder into your QGIS plugins directory:
 5. Turn on **Settings → Lock navigation** when you want to click around the map without losing your place
 6. To edit: click the **pencil** in the panel toolbar, change values in the form and move on — use **Save edits** to write them to the layer
 7. To edit several features at once: select them (navigation unlocked), change the fields you want, then click **Apply**
-8. Too many fields? Click the **eye** button and untick the ones you don't need
+8. Too many fields? Click the **eye** button and untick the ones you don't need, or drag them into the order you want
+9. Working through a long list? Use **Next unvisited** and the progress strip to see what you haven't checked yet
 
 ---
 
@@ -100,7 +114,9 @@ featurenaved/
 ├── navigator_widget.py  # Dock widget: navigation, selection sync, lock, list sync, editing
 ├── navigator_ui.py      # Builds the dock's widgets
 ├── multi_edit.py        # Multi-edit panel (explicit Apply)
-├── field_organizer.py   # Field organizer popup + hiding fields in the native form
+├── field_organizer.py   # Field organizer popup + hiding/reordering fields in the native form
+├── review.py            # Visited tracking and the progress strip
+├── measurements.py      # Area / perimeter / length / vertices
 ├── find_bar.py          # Find bar
 ├── compat.py            # Qt5/Qt6 and QGIS-version compatibility
 ├── utils.py             # Small shared helpers
@@ -116,8 +132,9 @@ featurenaved/
 ## Development & Tests
 
 The `tests/` folder holds a pytest suite that runs the plugin inside a real, headless QGIS
-(no window opens). It covers navigation, lock navigation, multi-edit, the field organizer,
-keeping the list in sync with the layer, the editing toolbar and plugin load/unload.
+(no window opens). It covers navigation, the frozen order, lock navigation, review progress, multi-edit,
+the field organizer, zoom modes, measurements, revert, keeping the list in sync with
+the layer, the editing toolbar and plugin load/unload.
 Tests use a throw-away settings folder, so they never touch your own QGIS settings.
 
 ```bash
