@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  qgis:
+    name: QGIS 3.34 (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QGIS and pytest
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-qgis qgis-providers python3-pytest
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: /usr/bin/python3 -m pytest tests -v -p no:cacheprovider
