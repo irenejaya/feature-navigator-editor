@@ -57,7 +57,8 @@ PAGES = [
              "The field that sets the order. The heading shows the current "
              "feature's value."),
             ("sort_order_btn", "/mActionArrowUp.svg", "Sort direction",
-             "Ascending or descending. Empty (NULL) values always go last."),
+             "Ascending or descending. Empty (NULL) values count as the "
+             "smallest: first when ascending, last when descending."),
         ],
         "notes": [],
     },

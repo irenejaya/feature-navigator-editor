@@ -527,8 +527,10 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             values.sort(reverse=reverse)
         except TypeError:
             values.sort(key=lambda e: (str(e[0]), e[1]), reverse=reverse)
-        # NULLs always go last, whatever the direction.
-        return [fid for _, fid in values] + nulls
+        ordered = [fid for _, fid in values]
+        # NULL counts as the smallest value: first when ascending, last when
+        # descending (handy for finding features with missing values).
+        return nulls + ordered if self.sort_ascending else ordered + nulls
 
     def _query_feature_ids(self):
         """Fresh, sorted list. This is the only place the order is decided

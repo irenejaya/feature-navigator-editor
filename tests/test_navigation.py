@@ -15,17 +15,19 @@ def test_loads_layer_in_na_state(dock, make_layer):
     assert dock._counter_label.text() == "NA"
 
 
-def test_sort_by_field_with_nulls_last(dock, make_layer):
+def test_null_sorts_as_the_smallest_value(dock, make_layer):
     layer = make_layer(6)
     layer.dataProvider().changeAttributeValues({1: {0: None}})
     dock.layer_combo.setLayer(layer)
     set_sort(dock, "area")
     areas = values(layer, dock.feature_ids, "area")
-    assert areas[:-1] == sorted(areas[:-1])
-    assert dock.feature_ids[-1] == 1           # the NULL goes last ...
+    assert dock.feature_ids[0] == 1            # NULL first when ascending
+    assert areas[1:] == sorted(areas[1:])
     dock.sort_order_btn.click()
     pump()
-    assert dock.feature_ids[-1] == 1           # ... in both directions
+    assert dock.feature_ids[-1] == 1           # ... and last when descending
+    areas = values(layer, dock.feature_ids, "area")
+    assert areas[:-1] == sorted(areas[:-1], reverse=True)
 
 
 def test_navigation_selects_the_current_feature(dock, make_layer):

@@ -54,6 +54,7 @@ changelog=
         * Fixed: features added, committed or rolled back elsewhere are picked up automatically
         * Fixed: values typed in the form are included when saving from the QGIS toolbar
         * Fixed: changing the sort keeps the current feature instead of jumping to the first one; sort field is remembered per layer
+        * Sorting: empty (NULL) values count as the smallest value - first when ascending, last when descending
         * Fixed: plugin unload/reload no longer leaves signal connections to a deleted panel
         * New: Help (book button next to Settings) - a window with numbered pictures and explanations for every button: Overview, Browsing, Editing one feature, Multi-edit, Lock navigation
         * Code split into modules, with a pytest suite running in headless QGIS and GitHub Actions CI
