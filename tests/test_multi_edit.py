@@ -37,7 +37,8 @@ def test_selection_change_never_applies(dock, make_layer):
     pump()
     assert values(layer, first_two, "land") == before
     assert row.checkbox.isChecked() and row.line_edit.text() == "IND"
-    assert dock._multi_panel.apply_btn.text() == "Apply to 3 features"
+    assert dock._multi_panel.apply_btn.text() == "Apply"
+    assert "all 3 selected features" in dock._multi_panel.apply_btn.toolTip()
 
 
 def test_apply_writes_once_and_undo_reverts(dock, make_layer):

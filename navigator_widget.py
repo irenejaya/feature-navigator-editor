@@ -1844,7 +1844,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             s.setValue(f"{p}/enable_flash", bool(self.enable_flash_cb.isChecked()))
             s.setValue(f"{p}/lock_navigation", bool(self.lock_nav_cb.isChecked()))
             s.setValue(f"{p}/track_visited", bool(self.track_visited_cb.isChecked()))
-            s.setValue(f"{p}/show_measurements",
+            s.setValue(f"{p}/measurements",
                        bool(self.show_measurements_cb.isChecked()))
             s.setValue(f"{p}/scale", int(self.scale_spin.value()))
             s.setValue(f"{p}/sort_ascending", bool(self.sort_ascending))
@@ -1875,7 +1875,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                                        (self.enable_flash_cb, "enable_flash", False),
                                        (self.lock_nav_cb, "lock_navigation", False),
                                        (self.track_visited_cb, "track_visited", True),
-                                       (self.show_measurements_cb, "show_measurements", True)):
+                                       (self.show_measurements_cb, "measurements", False)):
             checkbox.blockSignals(True)
             checkbox.setChecked(_b(key, default))
             checkbox.blockSignals(False)

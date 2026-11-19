@@ -238,6 +238,10 @@ class NavigatorUiMixin:
 
         self._measure_label = QLabel()
         self._measure_label.setWordWrap(True)
+        small = self._measure_label.font()
+        if small.pointSizeF() > 0:
+            small.setPointSizeF(max(6.0, small.pointSizeF() * 0.85))
+            self._measure_label.setFont(small)
         self._measure_label.setStyleSheet("color: gray;")
         self._measure_label.setTextInteractionFlags(
             qenum(Qt, 'TextInteractionFlag', 'TextSelectableByMouse'))
@@ -352,7 +356,8 @@ class NavigatorUiMixin:
         menu_layout.addWidget(self.track_visited_cb)
         self.show_measurements_cb = QCheckBox("Show measurements")
         self.show_measurements_cb.setToolTip(
-            "Area and perimeter (length for lines) under the form")
+            "Show the area and perimeter (length for lines) in small text\n"
+            "under the form. Off by default.")
         menu_layout.addWidget(self.show_measurements_cb)
         action = QWidgetAction(menu)
         action.setDefaultWidget(container)

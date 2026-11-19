@@ -482,7 +482,9 @@ class MultiEditPanel(QWidget):
         else:
             tail = grey("Edit a field to include it. Nothing changes until you click Apply.")
         self._info.setText(f"{head}<br>{tail}")
-        self.apply_btn.setText(f"Apply to {n} features" if n else "Apply")
+        self.apply_btn.setToolTip(
+            f"Write the ticked fields to all {n} selected features.\n"
+            "Changes go into the edit buffer \u2014 use Save Edits to keep them.")
         self.apply_btn.setEnabled(pending > 0)
         self.reset_btn.setEnabled(pending > 0)
 

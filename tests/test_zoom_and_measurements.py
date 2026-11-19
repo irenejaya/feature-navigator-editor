@@ -75,10 +75,20 @@ def test_old_auto_scale_setting_is_migrated(iface):
         widget.cleanup()
 
 
-def test_measurements_for_polygons(dock, parcels_gpkg):
+def test_measurements_are_off_until_ticked(dock, parcels_gpkg):
+    assert not dock.show_measurements_cb.isChecked()
     dock.layer_combo.setLayer(parcels_gpkg)
     dock._go_first()
     pump()
+    assert not dock._measure_label.isVisible()
+
+
+def test_measurements_for_polygons(dock, parcels_gpkg):
+    dock.show_measurements_cb.setChecked(True)
+    dock.layer_combo.setLayer(parcels_gpkg)
+    dock._go_first()
+    pump()
+    assert dock._measure_label.font().pointSizeF() < dock.font().pointSizeF()
     text = dock._measure_label.text()
     assert dock._measure_label.isVisible()
     area, perimeter = text.split(" \u00b7 ")

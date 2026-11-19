@@ -74,7 +74,7 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
   - **Keep scale** — centre on the feature without changing the zoom
   - **Fit feature** — zoom so the whole feature fits, with a margin
   - **Fixed scale** — centre at the scale you type (e.g. `1:500`)
-- **Measurements** under the form: area and perimeter (polygons), length (lines) or X/Y (points), using the project's ellipsoid and units — like the Identify tool's *Derived* section. Turn off with **Settings → Show measurements**
+- **Measurements (optional)** — tick **Settings → Show measurements** to see the area and perimeter (length for lines, X/Y for points) in small text under the form, using the project's ellipsoid and units. Off by default
 
 ---
 

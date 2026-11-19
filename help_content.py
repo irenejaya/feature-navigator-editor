@@ -92,8 +92,9 @@ PAGES = [
             ("_feature_form_container", None, "Feature form",
              "The attributes of the current feature. You can change them when "
              "the layer is in edit mode."),
-            ("_measure_label", None, "Measurements",
-             "Area and perimeter (length for lines), in the project's units."),
+            ("_measure_label", None, "Measurements (optional)",
+             "Tick Show measurements in Settings to see the area and perimeter "
+             "(length for lines) here in small text, in the project's units."),
         ],
         "notes": [
             "Click a feature on the map to jump to it. Clicking an empty spot "

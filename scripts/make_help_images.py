@@ -245,6 +245,7 @@ def main():
     dock.setAttribute(WA_DONT_SHOW, True)
     dock.resize(*PANEL_SIZE)
     dock.show()
+    dock.show_measurements_cb.setChecked(True)      # optional; shown in the pictures
     dock.layer_combo.setLayer(layer)
     dock.sort_field_combo.setCurrentIndex(dock.sort_field_combo.findData("FLOOD_PCT"))
     for index in (0, 1, 2, 3, 4, 9, 10, 4):

@@ -18,7 +18,7 @@ about=FeatureNavEd is a dockable panel that lets you navigate and edit features 
     <b>Help</b> — A help window with a numbered picture and explanation for every button, per mode.
     <b>Query Builder</b> — Filter the layer and navigate only the matching features.
     <b>Find</b> — Search for features by field value with an autocomplete dropdown, without filtering the navigation list.
-    <b>Auto-zoom</b> — Keep the scale, fit the whole feature, or use a fixed scale when navigating; area/perimeter/length shown under the form.
+    <b>Auto-zoom</b> — Keep the scale, fit the whole feature, or use a fixed scale when navigating; optional area/perimeter under the form.
 
 version=1.1.0
 author=Irene Jaya
@@ -46,7 +46,7 @@ changelog=
         * New: review progress - visited features are remembered (saved with the project), shown as a green dot, a clickable progress strip and "Visited n / N", with a Next unvisited button
         * New: stable order - the list only re-sorts when you ask; deletes, undo, new features and edits keep everything in place, and a re-sort button appears when sort values change
         * New: scale dropdown - Keep scale / Fit feature / Fixed scale (replaces the Auto-scale tick box; your setting carries over)
-        * New: measurements under the form - area and perimeter (length for lines, X/Y for points), using the project's ellipsoid and units
+        * New: optional measurements (Settings > Show measurements) - area and perimeter in small text under the form, using the project's ellipsoid and units
         * New: Revert this feature - discard the unsaved changes of only the feature on screen (a feature added this session is removed); one undo step
         * Undo also reverts a value you have just typed; saving a newly added feature keeps it on screen under its new id
         * Multi-edit rebuilt: nothing is applied until you click Apply (changing the selection or cancelling no longer writes values), pending values survive refining the selection, one undo step per Apply, read-only/primary-key fields are locked, and the form fits narrow panels without horizontal scrolling
