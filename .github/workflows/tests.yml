@@ -8,15 +8,30 @@ jobs:
   qgis:
     name: QGIS 3.34 (Ubuntu 24.04)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install QGIS and pytest
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            python3-qgis qgis-providers python3-pytest
+          # man-db triggers are slow on hosted runners and not needed here.
+          sudo rm -f /var/lib/man-db/auto-update
+          install_qgis() {
+            sudo apt-get update -o Acquire::Retries=5 &&
+            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+              python3-qgis qgis-providers python3-pytest
+          }
+          for attempt in 1 2 3; do
+            install_qgis && exit 0
+            # The runner's Azure mirror is occasionally unreachable: fall back
+            # to the main Ubuntu archive for the next attempt.
+            echo "::warning::apt failed (attempt $attempt), retrying without the Azure mirror"
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt 2>/dev/null || true
+            sleep 15
+          done
+          exit 1
 
       - name: Run tests
         env:
