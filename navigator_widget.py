@@ -58,7 +58,7 @@ def _same_geometry(a, b):
     if ga.isNull() or gb.isNull():
         return ga.isNull() and gb.isNull()
     try:
-        return ga.isGeosEqual(gb)
+        return ga.equals(gb)        # exact: same type, vertices and order
     except Exception:
         return ga.asWkt() == gb.asWkt()
 

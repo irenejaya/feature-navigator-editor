@@ -64,8 +64,23 @@ from helpers import field_type, polygon_wkb_type, pump  # noqa: E402
 QgsGui.editorWidgetRegistry().initEditors(None)
 
 
+_EXIT_STATUS = 0
+
+
 def pytest_sessionfinish(session, exitstatus):
+    global _EXIT_STATUS
+    _EXIT_STATUS = int(exitstatus)
     shutil.rmtree(_SETTINGS_DIR, ignore_errors=True)
+
+
+def pytest_unconfigure(config):
+    # Qt/PyQt can crash while Python tears down widgets and QGIS singletons
+    # in an arbitrary order at interpreter exit (seen with QGIS 4 / Qt6
+    # after every test had passed). The report is already printed by now,
+    # so leave immediately with pytest's own exit status.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_EXIT_STATUS)
 
 
 class FakeIface:
