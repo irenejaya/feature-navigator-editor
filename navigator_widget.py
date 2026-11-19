@@ -3,8 +3,25 @@
 FeatureNavEd - Dock Widget
 
 Dockable panel for navigating and editing vector layer features one by one.
-Uses QgsAttributeForm to render the native QGIS attribute form widget
-embedded directly in the panel — no OK/Cancel dialog buttons.
+
+How the pieces fit together
+---------------------------
+* **Single feature** - the native ``QgsAttributeForm`` (SingleEditMode) is
+  embedded in the panel. Edits go into the layer's *edit buffer* when you move
+  to another feature, save, undo or stop editing - never straight to disk.
+* **Multi-edit** - 2+ selected features on an editable layer switch the panel
+  to :class:`~.multi_edit.MultiEditPanel`, which only writes on *Apply*.
+* **Lock navigation** - decouples the navigator from the map selection:
+  clicking around the canvas no longer moves it, the locked feature stays
+  outlined, and multi-edit is disabled.
+* **Field organizer** - hide fields you don't need (per layer, saved with the
+  project) in both the single-feature form and the multi-edit panel.
+* **List sync** - the navigation list follows the layer: features deleted
+  (panel, Del key, attribute table), added, undone, committed or rolled back
+  anywhere in QGIS are reflected without a manual reload.
+
+Other modules: ``navigator_ui`` (widget construction), ``multi_edit``,
+``find_bar``, ``field_organizer``, ``compat`` (Qt5/Qt6 shims), ``utils``.
 """
 
 try:
@@ -12,120 +29,123 @@ try:
 except ImportError:
     _xml_fromstring = None
 
-import os
+import html
 
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QIcon, QKeySequence
-from qgis.PyQt.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QCheckBox, QShortcut,
-    QGroupBox, QSpinBox, QToolButton, QDialogButtonBox,
-    QLineEdit, QCompleter, QScrollArea, QFrame,
-    QMenu, QWidgetAction, QMessageBox
-)
-
-# Qt5/Qt6 enum compatibility
-_AlignCenter = getattr(Qt, 'AlignCenter', None) or Qt.AlignmentFlag.AlignCenter
-_AllDockAreas = (
-    getattr(Qt, 'LeftDockWidgetArea', None)
-    or Qt.DockWidgetArea.LeftDockWidgetArea
-) | (
-    getattr(Qt, 'RightDockWidgetArea', None)
-    or Qt.DockWidgetArea.RightDockWidgetArea
-) | (
-    getattr(Qt, 'TopDockWidgetArea', None)
-    or Qt.DockWidgetArea.TopDockWidgetArea
-) | (
-    getattr(Qt, 'BottomDockWidgetArea', None)
-    or Qt.DockWidgetArea.BottomDockWidgetArea
-)
-
+from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtWidgets import QDockWidget, QMessageBox
 from qgis.core import (
-    Qgis, QgsApplication, QgsProject, QgsMapLayerProxyModel,
-    QgsVectorLayer, QgsCoordinateTransform, QgsFeature, QgsSettings
+    QgsApplication, QgsFeatureRequest, QgsProject, QgsSettings, QgsVectorLayer,
 )
-from qgis.gui import (
-    QgsMapLayerComboBox, QgsMapToolIdentifyFeature, QgsExpressionLineEdit,
-    QgsAttributeForm, QgsAttributeEditorContext
+from qgis.gui import QgsAttributeEditorContext, QgsAttributeForm, QgsHighlight
+
+from .compat import (
+    ALL_DOCK_AREAS, MB_NO, MB_YES, NO_GEOMETRY, SCROLL_AS_NEEDED, TOOLTIP_ROLE,
+    form_mode, message_level,
 )
+from .field_organizer import (
+    apply_field_order, apply_to_attribute_form, load_field_order,
+    load_hidden_fields, organizable_fields, save_field_order, save_hidden_fields,
+    uses_generated_layout,
+)
+from .measurements import describe_geometry
+from .navigator_ui import NavigatorUiMixin
+from .review import VisitedStore
+from .utils import feature_exists, grey, is_null, make_scroll_area, values_equal
 
-try:
-    from qgis.core import NULL
-except ImportError:
-    NULL = None
-
-
-class _DropWidget(QWidget):
-    """Content widget that accepts layer drag-and-drop from the Layers panel."""
-
-    def __init__(self, dock):
-        super().__init__()
-        self._dock = dock
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat('application/qgis.layertreemodeldata'):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat('application/qgis.layertreemodeldata'):
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        layer = self._dock._extract_layer_from_drop(event.mimeData())
-        if layer:
-            self._dock.layer_combo.setLayer(layer)
-            event.acceptProposedAction()
-        else:
-            super().dropEvent(event)
+_LOCK_HIGHLIGHT_COLOR = QColor(255, 128, 0)
 
 
-class FeatureNavEdDockWidget(QDockWidget):
+def _same_geometry(a, b):
+    ga, gb = a.geometry(), b.geometry()
+    if ga.isNull() or gb.isNull():
+        return ga.isNull() and gb.isNull()
+    # Exact equality: same type, vertices and order. isExactlyEqual()
+    # replaces equals() from QGIS 4.2.
+    exact = getattr(ga, 'isExactlyEqual', None) or ga.equals
+    try:
+        return exact(gb)
+    except Exception:
+        return ga.asWkt() == gb.asWkt()
+
+
+class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
     """Dock widget for navigating and editing features in a vector layer."""
+
+    _SETTINGS_PREFIX = "featurenaved"
 
     def __init__(self, iface, parent=None):
         super().__init__("FeatureNavEd", parent)
         self.iface = iface
-        self.feature_ids = []
-        self.current_index = -1
+
+        self._layer = None                 # QgsVectorLayer being navigated
+        self._layer_id = None
+        self._layer_connections = []       # [(bound signal, slot)]
+        self.feature_ids = []              # sorted navigation list
+        self.current_index = -1            # -1 = no active feature ("NA")
+        self._last_fid = None              # where to resume from the NA state
+        self._last_index = -1
         self.sort_ascending = True
+        self._layer_positions = {}         # layer id -> last fid
+        self._layer_sort_fields = {}       # layer id -> sort field name
+
         self._feature_form = None
         self._feature_form_container = None
-        self._feature_form_layer_id = None  # cache key: only reuse form for same layer
-        self._locked_selection_ids = None   # None = not locked
-        self._pick_tool = None
-        self._prev_map_tool = None
-        self._current_layer_id = None
-        self._layer_positions = {}
-        self._history = []          # list of (layer_id, fid)
-        self._forward_history = []    # list of (layer_id, fid) for forward navigation
-        self._navigating_back = False
-        self._multi_edit_mode = False        # True when ≥2 features selected + layer editable
-        self._passive_multi_indicator = False # True when ≥2 selected but layer NOT editable
-        self._multi_edit_rows = []            # [(field_idx, QgsField, QCheckBox, QLineEdit)]
-        self._form_saving = False             # True while we call form.save() internally
+        self._feature_form_layer_id = None
+        self._form_error = None
+        self._form_saving = False          # True while we push form values
+        self._form_dirty = False           # typed values not yet in the buffer
+        self._commit_snapshot = None       # new feature being committed
+        self._fid_remap = {}               # temporary id -> committed id
 
-        self.setAllowedAreas(_AllDockAreas)
+        self._multi_edit_mode = False      # 2+ selected on an editable layer
+        self._passive_count = 0            # 2+ selected on a read-only layer
+        self._lock_navigation = False
+        self._highlight = None
+        self._suppress_selection = False   # True while we select features
+
+        self._sort_keys = {}               # fid -> sort value when the list was built
+        self._stale_sort = set()           # fids whose sort value changed since
+        self._visited = VisitedStore()     # review tracking, saved on the layer
+        self._seen_before = False          # current feature was visited before
+        self._measure_text = ""
+        self._hidden_fields = set()        # field names hidden in the panel
+        self._field_order = []             # user's field order (empty = layer's)
+        self._field_counts = (0, 0)        # (shown, total) for the hint
+        self._content_mode = 'placeholder'
+        self._help_dialog = None
+
+        # Structural layer changes (delete/add/commit/rollback) are coalesced
+        # and processed once control returns to the event loop.
+        self._pending_deleted = set()
+        self._pending_full_reload = False
+        self._structure_timer = self._single_shot(self._process_structure_changes)
+        self._refresh_timer = self._single_shot(self._refresh_from_layer)
+        self._field_visibility_timer = self._single_shot(self._apply_field_view)
+
+        self.setAllowedAreas(ALL_DOCK_AREAS)
         self.setObjectName("FeatureNavEdDockWidget")
         self.setAcceptDrops(True)
 
         self._build_ui()
         self._connect_signals()
         self._load_settings()
+        self._update_display()
 
-        # React when a layer is about to be removed from the project, so we can
-        # clean up the embedded feature form BEFORE its underlying C++ layer is
-        # destroyed (otherwise the widget can end up in a broken state).
+        # Tear the form down BEFORE the C++ layer is destroyed.
+        project = QgsProject.instance()
         try:
-            QgsProject.instance().layerWillBeRemoved.connect(
-                self._on_layer_will_be_removed
-            )
-        except Exception:
-            pass
+            self._layer_removed_signal = project.layerWillBeRemoved[str]
+        except (KeyError, TypeError):
+            self._layer_removed_signal = project.layerWillBeRemoved
+        self._layer_removed_signal.connect(self._on_layer_will_be_removed)
+
+    def _single_shot(self, slot):
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(0)
+        timer.timeout.connect(slot)
+        return timer
 
     # =========================================================================
     # DRAG AND DROP
@@ -170,464 +190,77 @@ class FeatureNavEdDockWidget(QDockWidget):
         return None
 
     # =========================================================================
-    # UI
-    # =========================================================================
-
-    def _build_ui(self):
-        main_widget = _DropWidget(self)
-        self._main_layout = QVBoxLayout(main_widget)
-        self._main_layout.setContentsMargins(4, 4, 4, 4)
-        self._main_layout.setSpacing(4)
-
-        # --- Top Toolbar ---
-        toolbar_row = QHBoxLayout()
-        toolbar_row.setSpacing(2)
-
-        self.pick_btn = QToolButton()
-        self.pick_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionIdentify.svg')
-        )
-        self.pick_btn.setToolTip("Pick feature from map")
-        self.pick_btn.setAutoRaise(True)
-        self.pick_btn.setCheckable(True)
-        toolbar_row.addWidget(self.pick_btn)
-
-        self.filter_btn = QToolButton()
-        self.filter_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionFilter2.svg')
-        )
-        self.filter_btn.setToolTip("Toggle filter bar")
-        self.filter_btn.setAutoRaise(True)
-        self.filter_btn.setCheckable(True)
-        toolbar_row.addWidget(self.filter_btn)
-
-        self.query_builder_btn = QToolButton()
-        try:
-            import db_manager as _dbm
-            _qb_icon_path = os.path.join(os.path.dirname(_dbm.__file__), 'icons', 'sql.gif')
-            _qb_icon = QIcon(_qb_icon_path) if os.path.exists(_qb_icon_path) else QgsApplication.getThemeIcon('/mActionOptions.svg')
-        except Exception:
-            _qb_icon = QgsApplication.getThemeIcon('/mActionOptions.svg')
-        self.query_builder_btn.setIcon(_qb_icon)
-        self.query_builder_btn.setToolTip(
-            "Query Builder — click to set a filter and see only matching features; "
-            "click again to clear the filter"
-        )
-        self.query_builder_btn.setAutoRaise(True)
-        self.query_builder_btn.setCheckable(True)
-        toolbar_row.addWidget(self.query_builder_btn)
-
-        self.search_btn = QToolButton()
-        self.search_btn.setIcon(
-            QgsApplication.getThemeIcon('/search.svg')
-        )
-        self.search_btn.setToolTip("Find feature by expression (no filtering)")
-        self.search_btn.setAutoRaise(True)
-        self.search_btn.setCheckable(True)
-        toolbar_row.addWidget(self.search_btn)
-
-        self.attr_table_btn = QToolButton()
-        self.attr_table_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionOpenTable.svg')
-        )
-        self.attr_table_btn.setToolTip("Open attribute table")
-        self.attr_table_btn.setAutoRaise(True)
-        toolbar_row.addWidget(self.attr_table_btn)
-
-        self.back_btn = QToolButton()
-        self.back_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionUndo.svg')
-        )
-        self.back_btn.setToolTip("Go back to last viewed feature")
-        self.back_btn.setAutoRaise(True)
-        self.back_btn.setEnabled(False)
-        toolbar_row.addWidget(self.back_btn)
-
-        self.forward_btn = QToolButton()
-        self.forward_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionRedo.svg')
-        )
-        self.forward_btn.setToolTip("Go forward to next viewed feature")
-        self.forward_btn.setAutoRaise(True)
-        self.forward_btn.setEnabled(False)
-        toolbar_row.addWidget(self.forward_btn)
-
-        # --- Advanced Options dropdown ---
-        self.advanced_btn = QToolButton()
-        self.advanced_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionOptions.svg')
-        )
-        self.advanced_btn.setToolTip("Advanced options")
-        self.advanced_btn.setAutoRaise(True)
-        try:
-            self.advanced_btn.setPopupMode(QToolButton.InstantPopup)
-        except (AttributeError, TypeError):
-            self.advanced_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        adv_menu = QMenu(self.advanced_btn)
-        adv_container = QWidget(adv_menu)
-        adv_layout = QVBoxLayout(adv_container)
-        adv_layout.setContentsMargins(8, 6, 8, 6)
-        adv_layout.setSpacing(4)
-        self.enable_flash_cb = QCheckBox("Flash on navigation")
-        self.enable_flash_cb.setChecked(False)
-        self.enable_flash_cb.setToolTip(
-            "Briefly flash the feature on the map when the form navigates to it.\n"
-            "Disable this to avoid the flash effect when clicking features for editing.\n"
-            "The Flash toolbar button still works on-demand."
-        )
-        adv_layout.addWidget(self.enable_flash_cb)
-        adv_action = QWidgetAction(adv_menu)
-        adv_action.setDefaultWidget(adv_container)
-        adv_menu.addAction(adv_action)
-        self.advanced_btn.setMenu(adv_menu)
-        toolbar_row.addWidget(self.advanced_btn)
-
-        toolbar_row.addStretch()
-        self._main_layout.addLayout(toolbar_row)
-
-        # --- Search Bar (collapsible) ---
-        self._search_bar = QWidget()
-        search_bar_layout = QHBoxLayout(self._search_bar)
-        search_bar_layout.setContentsMargins(0, 0, 0, 0)
-        search_bar_layout.setSpacing(2)
-
-        self.search_field_combo = QComboBox()
-        self.search_field_combo.setToolTip("Field to search")
-        search_bar_layout.addWidget(self.search_field_combo)
-
-        self.search_value_edit = QLineEdit()
-        self.search_value_edit.setPlaceholderText("Value...")
-        self.search_value_edit.setClearButtonEnabled(True)
-        self.search_value_edit.setToolTip("Value to find (exact match)")
-        self._search_completer = QCompleter([], self.search_value_edit)
-        self._search_completer.setCaseSensitivity(
-            getattr(Qt, 'CaseInsensitive', None) or Qt.CaseSensitivity.CaseInsensitive
-        )
-        self._search_completer.setFilterMode(
-            getattr(Qt, 'MatchContains', None) or Qt.MatchFlag.MatchContains
-        )
-        self.search_value_edit.setCompleter(self._search_completer)
-        search_bar_layout.addWidget(self.search_value_edit, 1)
-
-        self.search_go_btn = QToolButton()
-        self.search_go_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionZoomToSelected.svg')
-        )
-        self.search_go_btn.setToolTip("Go to match (Enter)")
-        self.search_go_btn.setAutoRaise(True)
-        search_bar_layout.addWidget(self.search_go_btn)
-
-        self.search_prev_btn = QToolButton()
-        self.search_prev_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionArrowUp.svg')
-        )
-        self.search_prev_btn.setToolTip("Previous match")
-        self.search_prev_btn.setAutoRaise(True)
-        search_bar_layout.addWidget(self.search_prev_btn)
-
-        self.search_next_btn = QToolButton()
-        self.search_next_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionArrowDown.svg')
-        )
-        self.search_next_btn.setToolTip("Next match")
-        self.search_next_btn.setAutoRaise(True)
-        search_bar_layout.addWidget(self.search_next_btn)
-
-        self._search_bar.setVisible(False)
-        self._main_layout.addWidget(self._search_bar)
-
-        # --- Filter Bar (collapsible) ---
-        self._filter_bar = QWidget()
-        filter_bar_layout = QHBoxLayout(self._filter_bar)
-        filter_bar_layout.setContentsMargins(0, 0, 0, 0)
-        filter_bar_layout.setSpacing(4)
-
-        self.filter_expression = QgsExpressionLineEdit()
-        self.filter_expression.setExpressionDialogTitle("Filter Expression")
-        self.filter_expression.setToolTip("Expression to filter features")
-        filter_bar_layout.addWidget(self.filter_expression, 1)
-
-        self.selected_only_cb = QCheckBox("Selected only")
-        self.selected_only_cb.setToolTip("Navigate only through currently selected features")
-        filter_bar_layout.addWidget(self.selected_only_cb)
-
-        self.lock_selection_btn = QToolButton()
-        self.lock_selection_btn.setIcon(
-            QgsApplication.getThemeIcon('/lockedGray.svg')
-        )
-        self.lock_selection_btn.setToolTip(
-            "Lock the current selection as a fixed navigation set "
-            "(stops auto-refreshing when the map selection changes)"
-        )
-        self.lock_selection_btn.setAutoRaise(True)
-        self.lock_selection_btn.setCheckable(True)
-        filter_bar_layout.addWidget(self.lock_selection_btn)
-
-        self._filter_bar.setVisible(False)
-        self._main_layout.addWidget(self._filter_bar)
-
-        # --- Layer ---
-        _BOLD_GROUP_STYLE = (
-            "QGroupBox { font-weight: bold; }"
-            " QGroupBox * { font-weight: normal; }"
-        )
-        layer_group = QGroupBox("Layer")
-        layer_group.setStyleSheet(_BOLD_GROUP_STYLE)
-        layer_layout = QHBoxLayout()
-        layer_layout.setContentsMargins(4, 4, 4, 4)
-        layer_layout.setSpacing(4)
-
-        self.layer_combo = QgsMapLayerComboBox()
-        try:
-            self.layer_combo.setFilters(Qgis.LayerFilter.VectorLayer)
-        except AttributeError:
-            self.layer_combo.setFilters(QgsMapLayerProxyModel.VectorLayer)
-        self.layer_combo.setAllowEmptyLayer(True)
-        self.layer_combo.setCurrentIndex(0)  # start with empty (no layer)
-        self.layer_combo.setShowCrs(True)
-        self.layer_combo.setMinimumContentsLength(10)
-        try:
-            self.layer_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        except AttributeError:
-            self.layer_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        layer_layout.addWidget(self.layer_combo)
-
-        self.active_layer_btn = QToolButton()
-        self.active_layer_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionRefresh.svg')
-        )
-        self.active_layer_btn.setToolTip("Use active layer / reload")
-        self.active_layer_btn.setAutoRaise(True)
-        layer_layout.addWidget(self.active_layer_btn)
-
-        layer_group.setLayout(layer_layout)
-        self._main_layout.addWidget(layer_group)
-
-        # --- Sort ---
-        self._sort_group = QGroupBox("Sort By")
-        self._sort_group.setStyleSheet(_BOLD_GROUP_STYLE)
-        sort_layout = QHBoxLayout()
-        sort_layout.setContentsMargins(4, 4, 4, 4)
-        sort_layout.setSpacing(4)
-
-        self.sort_field_combo = QComboBox()
-        self.sort_field_combo.setToolTip("Field to sort features by")
-        sort_layout.addWidget(self.sort_field_combo, 1)
-
-        self.sort_order_btn = QToolButton()
-        self.sort_order_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionArrowUp.svg')
-        )
-        self.sort_order_btn.setToolTip("Ascending — click to toggle")
-        self.sort_order_btn.setAutoRaise(True)
-        self.sort_order_btn.setIconSize(self.sort_order_btn.iconSize() * 1.2)
-        sort_layout.addWidget(self.sort_order_btn)
-
-        self._sort_group.setLayout(sort_layout)
-        self._main_layout.addWidget(self._sort_group)
-
-        # --- Navigate ---
-        nav_group = QGroupBox("Navigate")
-        nav_group.setStyleSheet(_BOLD_GROUP_STYLE)
-        nav_layout = QVBoxLayout()
-        nav_layout.setContentsMargins(4, 4, 4, 4)
-        nav_layout.setSpacing(4)
-
-        nav_row = QHBoxLayout()
-        nav_row.setSpacing(2)
-
-        self.first_btn = QToolButton()
-        self.first_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionDoubleArrowLeft.svg')
-        )
-        self.first_btn.setToolTip("First feature (Alt+Home)")
-        self.first_btn.setAutoRaise(True)
-        nav_row.addWidget(self.first_btn)
-
-        self.prev_btn = QToolButton()
-        self.prev_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionArrowLeft.svg')
-        )
-        self.prev_btn.setToolTip("Previous feature (Alt+Left)")
-        self.prev_btn.setAutoRaise(True)
-        nav_row.addWidget(self.prev_btn)
-
-        nav_row.addStretch()
-        self.feature_spin = QSpinBox()
-        self.feature_spin.setRange(0, 0)
-        self.feature_spin.setAlignment(_AlignCenter)
-        self.feature_spin.setToolTip("Type a feature number to jump to it")
-        self.feature_spin.setKeyboardTracking(False)
-        nav_row.addWidget(self.feature_spin)
-        self._multi_label = QLabel("M")
-        self._multi_label.setAlignment(_AlignCenter)
-        self._multi_label.setToolTip("Multi-edit active — multiple features selected")
-        self._multi_label.setVisible(False)
-        self._multi_label.setMinimumWidth(self.feature_spin.sizeHint().width())
-        nav_row.addWidget(self._multi_label)
-        self.feature_total_label = QLabel("/ 0")
-        nav_row.addWidget(self.feature_total_label)
-        nav_row.addStretch()
-
-        self.next_btn = QToolButton()
-        self.next_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionArrowRight.svg')
-        )
-        self.next_btn.setToolTip("Next feature (Alt+Right)")
-        self.next_btn.setAutoRaise(True)
-        nav_row.addWidget(self.next_btn)
-
-        self.last_btn = QToolButton()
-        self.last_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionDoubleArrowRight.svg')
-        )
-        self.last_btn.setToolTip("Last feature (Alt+End)")
-        self.last_btn.setAutoRaise(True)
-        nav_row.addWidget(self.last_btn)
-
-        self.flash_btn = QToolButton()
-        self.flash_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionHighlightFeature.svg')
-        )
-        self.flash_btn.setToolTip("Flash feature again")
-        self.flash_btn.setAutoRaise(True)
-        nav_row.addWidget(self.flash_btn)
-
-        self.del_btn = QToolButton()
-        self.del_btn.setIcon(
-            QgsApplication.getThemeIcon('/mActionDeleteSelected.svg')
-        )
-        self.del_btn.setToolTip("Delete current feature (layer must be editable)")
-        self.del_btn.setAutoRaise(True)
-        self.del_btn.setEnabled(False)
-        nav_row.addWidget(self.del_btn)
-
-        nav_layout.addLayout(nav_row)
-
-        # Options
-        options_row = QHBoxLayout()
-        self.auto_zoom_cb = QCheckBox("Auto-zoom")
-        self.auto_zoom_cb.setChecked(True)
-        self.auto_zoom_cb.setToolTip("Centre on feature when navigating")
-        options_row.addWidget(self.auto_zoom_cb)
-
-        self.auto_scale_cb = QCheckBox("Auto-scale")
-        self.auto_scale_cb.setChecked(True)
-        self.auto_scale_cb.setToolTip("Use current map canvas scale (uncheck to set a custom scale)")
-        options_row.addWidget(self.auto_scale_cb)
-
-        options_row.addStretch()
-        self._scale_label = QLabel("Scale:")
-        options_row.addWidget(self._scale_label)
-
-        self.scale_spin = QSpinBox()
-        self.scale_spin.setRange(100, 1000000)
-        self.scale_spin.setValue(1000)
-        self.scale_spin.setSingleStep(500)
-        self.scale_spin.setPrefix("1:")
-        self.scale_spin.setToolTip("Map scale when zooming to features")
-        options_row.addWidget(self.scale_spin)
-        self._update_scale_controls(self.auto_scale_cb.isChecked())
-
-        nav_layout.addLayout(options_row)
-        nav_group.setLayout(nav_layout)
-        self._main_layout.addWidget(nav_group)
-
-        # --- Feature Form placeholder ---
-        # The native QGIS feature form will be inserted here (stretch=1)
-        self._form_placeholder = QLabel("No feature selected")
-        self._form_placeholder.setEnabled(False)
-        self._form_placeholder.setAlignment(_AlignCenter)
-        self._main_layout.addWidget(self._form_placeholder, 1)
-
-        # --- Multi-edit OK / Cancel (hidden until ≥2 features selected) ---
-        try:
-            _ok_cancel = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        except AttributeError:
-            _ok_cancel = (
-                QDialogButtonBox.StandardButton.Ok
-                | QDialogButtonBox.StandardButton.Cancel
-            )
-        self._multi_edit_buttons = QDialogButtonBox(_ok_cancel)
-        self._multi_edit_buttons.button(
-            self._multi_edit_buttons.Ok if hasattr(self._multi_edit_buttons, 'Ok')
-            else QDialogButtonBox.StandardButton.Ok
-        ).setText("Apply to selected")
-        self._multi_edit_buttons.setVisible(False)
-        self._main_layout.addWidget(self._multi_edit_buttons)
-
-        # --- Keyboard shortcuts ---
-        # Use ApplicationShortcut so the shortcuts fire anywhere in QGIS,
-        # even when another layer / panel has focus (e.g. editing Layer B
-        # while Layer A is loaded in FeatureNavEd).
-        _AppShortcut = (
-            getattr(Qt, 'ApplicationShortcut', None)
-            or Qt.ShortcutContext.ApplicationShortcut
-        )
-        self._shortcut_prev = QShortcut(QKeySequence("Alt+Left"), main_widget)
-        self._shortcut_prev.setContext(_AppShortcut)
-        self._shortcut_next = QShortcut(QKeySequence("Alt+Right"), main_widget)
-        self._shortcut_next.setContext(_AppShortcut)
-        self._shortcut_first = QShortcut(QKeySequence("Alt+Home"), main_widget)
-        self._shortcut_first.setContext(_AppShortcut)
-        self._shortcut_last = QShortcut(QKeySequence("Alt+End"), main_widget)
-        self._shortcut_last.setContext(_AppShortcut)
-        # Additional aliases / shortcuts
-        self._shortcut_prev_alt = QShortcut(QKeySequence("Alt+P"), main_widget)
-        self._shortcut_prev_alt.setContext(_AppShortcut)
-        self._shortcut_next_alt = QShortcut(QKeySequence("Alt+N"), main_widget)
-        self._shortcut_next_alt.setContext(_AppShortcut)
-
-        self.setWidget(main_widget)
-
-    # =========================================================================
-    # SIGNALS
+    # SIGNALS / CLEANUP
     # =========================================================================
 
     def _connect_signals(self):
         self.layer_combo.layerChanged.connect(self._on_layer_changed)
         self.active_layer_btn.clicked.connect(self._use_active_layer)
-        self.sort_field_combo.currentIndexChanged.connect(self._reload_features)
+        self.sort_field_combo.currentIndexChanged.connect(self._on_sort_field_changed)
         self.sort_order_btn.clicked.connect(self._toggle_sort_order)
-        self.filter_btn.toggled.connect(self._filter_bar.setVisible)
+
+        self.toggle_edit_btn.clicked.connect(self._toggle_editing)
+        self.save_edits_btn.clicked.connect(self._save_edits)
+        self.undo_btn.clicked.connect(self._undo)
+        self.redo_btn.clicked.connect(self._redo)
+        self.revert_btn.clicked.connect(self._revert_current_feature)
+        self.resort_btn.clicked.connect(self._reload_features)
         self.query_builder_btn.clicked.connect(self._toggle_query_builder)
-        self.search_btn.toggled.connect(self._search_bar.setVisible)
-        self.search_go_btn.clicked.connect(self._go_next_match)
-        self.search_next_btn.clicked.connect(self._go_next_match)
-        self.search_prev_btn.clicked.connect(self._go_prev_match)
-        self.search_value_edit.returnPressed.connect(self._go_next_match)
-        self.search_field_combo.currentIndexChanged.connect(self._populate_search_values)
-        self.attr_table_btn.clicked.connect(self._open_attribute_table)
-        self.back_btn.clicked.connect(self._go_back)
-        self.forward_btn.clicked.connect(self._go_forward)
-        self.filter_expression.expressionChanged.connect(self._on_filter_changed)
-        self.selected_only_cb.toggled.connect(lambda *_: self._reload_features())
+        self.search_btn.toggled.connect(self._on_search_toggled)
+        self._find_bar.findRequested.connect(self._find_match)
+        self._fields_menu.aboutToShow.connect(self._refresh_field_organizer)
+        self._fields_menu.aboutToHide.connect(self._update_fields_indicator)
+        self._field_organizer.changed.connect(self._on_organizer_changed)
+        self._fields_hint.linkActivated.connect(self._on_fields_hint_link)
+        self.help_btn.clicked.connect(self._show_help)
+
         self.first_btn.clicked.connect(self._go_first)
         self.prev_btn.clicked.connect(self._go_prev)
         self.next_btn.clicked.connect(self._go_next)
         self.last_btn.clicked.connect(self._go_last)
         self.feature_spin.valueChanged.connect(self._go_to_feature_number)
-        self.pick_btn.toggled.connect(self._toggle_pick_mode)
         self.flash_btn.clicked.connect(self._flash_current)
-        self.auto_scale_cb.toggled.connect(self._update_scale_controls)
-        self.iface.mapCanvas().scaleChanged.connect(self._on_canvas_scale_changed)
-        self._shortcut_prev.activated.connect(self._go_prev)
-        self._shortcut_next.activated.connect(self._go_next)
-        self._shortcut_first.activated.connect(self._go_first)
-        self._shortcut_last.activated.connect(self._go_last)
-        self._shortcut_prev_alt.activated.connect(self._go_prev)
-        self._shortcut_next_alt.activated.connect(self._go_next)
-        # New: lock selection toggle, duplicate / delete
-        self.lock_selection_btn.toggled.connect(self._on_lock_selection_toggled)
         self.del_btn.clicked.connect(self._delete_current_feature)
-        # Persist settings whenever the user changes a relevant option
-        self.auto_zoom_cb.toggled.connect(lambda *_: self._save_settings())
-        self.auto_scale_cb.toggled.connect(lambda *_: self._save_settings())
-        self.enable_flash_cb.toggled.connect(lambda *_: self._save_settings())
-        self.scale_spin.valueChanged.connect(lambda *_: self._save_settings())
-        # Multi-edit OK / Cancel
-        self._multi_edit_buttons.accepted.connect(self._on_multi_edit_ok)
-        self._multi_edit_buttons.rejected.connect(self._on_multi_edit_cancel)
+        self._form_placeholder.linkActivated.connect(self._on_placeholder_link)
+        self.review_strip.jumpRequested.connect(self._go_to_index)
+        self.next_unvisited_btn.clicked.connect(self._go_next_unvisited)
+
+        self.scale_mode_combo.currentIndexChanged.connect(self._on_scale_mode_changed)
+        self.iface.mapCanvas().scaleChanged.connect(self._on_canvas_scale_changed)
+
+        self.lock_nav_cb.toggled.connect(self._on_lock_navigation_toggled)
+        self.track_visited_cb.toggled.connect(self._on_track_visited_toggled)
+        self.show_measurements_cb.toggled.connect(self._on_show_measurements_toggled)
+        self.clear_visited_action.triggered.connect(self._clear_visited)
+        self.auto_zoom_cb.toggled.connect(self._save_settings)
+        self.enable_flash_cb.toggled.connect(self._save_settings)
+        self.scale_spin.valueChanged.connect(self._save_settings)
+
+        self._multi_panel.apply_btn.clicked.connect(self._on_multi_edit_apply)
+
+    def cleanup(self):
+        """Disconnect from QGIS before the plugin is unloaded."""
+        for timer in (self._structure_timer, self._refresh_timer,
+                      self._field_visibility_timer):
+            timer.stop()
+        self._clear_highlight()
+        self._multi_edit_mode = False
+        self._multi_panel.clear()
+        self._accept_current_form()
+        self._remove_current_form()
+        self._disconnect_layer()
+        self._layer = None
+        self._layer_id = None
+        if self._help_dialog is not None:
+            self._help_dialog.close()
+            self._help_dialog.deleteLater()
+            self._help_dialog = None
+        for signal, slot in ((self._layer_removed_signal, self._on_layer_will_be_removed),
+                             (self.iface.mapCanvas().scaleChanged, self._on_canvas_scale_changed)):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
 
     # =========================================================================
     # LAYER HANDLING
@@ -635,465 +268,496 @@ class FeatureNavEdDockWidget(QDockWidget):
 
     def _use_active_layer(self):
         active = self.iface.activeLayer()
-        current = self.layer_combo.currentLayer()
-        if isinstance(active, QgsVectorLayer) and active != current:
+        if isinstance(active, QgsVectorLayer) and active is not self._layer:
             self.layer_combo.setLayer(active)
         else:
             self._reload_features()
 
-    def _update_scale_controls(self, checked):
-        """Enable/disable the scale spinbox based on auto-scale checkbox."""
-        self._scale_label.setEnabled(not checked)
-        self.scale_spin.setEnabled(not checked)
-        if checked:
-            self._sync_scale_from_canvas()
+    def _connect_layer(self, layer):
+        slots = [
+            ('selectionChanged', self._on_selection_changed),
+            ('editingStarted', self._on_editing_state_changed),
+            ('editingStopped', self._on_editing_state_changed),
+            ('attributeValueChanged', self._on_attribute_value_changed),
+            ('geometryChanged', self._on_geometry_changed),
+            ('featuresDeleted', self._on_features_deleted),
+            ('featureAdded', self._on_feature_added),
+            ('afterRollBack', self._schedule_full_resync),
+            ('afterCommitChanges', self._schedule_full_resync),
+            ('subsetStringChanged', self._on_subset_changed),
+            ('updatedFields', self._on_fields_updated),
+            ('beforeCommitChanges', self._on_before_commit_changes),
+            ('committedFeaturesAdded', self._on_committed_features_added),
+            ('beforeModifiedCheck', self._on_before_commit),
+        ]
+        for name, slot in slots:
+            signal = getattr(layer, name, None)
+            if signal is None:
+                continue
+            try:
+                signal.connect(slot)
+                self._layer_connections.append((signal, slot))
+            except Exception:
+                pass
+        try:
+            stack = layer.undoStack()
+            for signal in (stack.canUndoChanged, stack.canRedoChanged):
+                signal.connect(self._update_toolbar_state)
+                self._layer_connections.append((signal, self._update_toolbar_state))
+        except Exception:
+            pass
 
-    def _on_canvas_scale_changed(self, scale):
-        """Update spinbox when canvas scale changes and auto-scale is on."""
-        if self.auto_scale_cb.isChecked():
-            self.scale_spin.blockSignals(True)
-            self.scale_spin.setValue(round(scale))
-            self.scale_spin.blockSignals(False)
-
-    def _sync_scale_from_canvas(self):
-        """Sync spinbox value to current canvas scale."""
-        scale = round(self.iface.mapCanvas().scale())
-        self.scale_spin.blockSignals(True)
-        self.scale_spin.setValue(scale)
-        self.scale_spin.blockSignals(False)
-
-    def _on_layer_will_be_removed(self, layer_id):
-        """Clean up state when a layer is about to be removed from the project.
-
-        This runs BEFORE the underlying C++ layer is destroyed, so the embedded
-        feature form (which holds a pointer to that layer) can be torn down
-        cleanly. Without this, the form widget can stay in the layout while
-        pointing at a dangling layer and the dock ends up in a broken state.
-        """
-        # Drop history and saved positions for the removed layer.
-        self._history = [h for h in self._history if h[0] != layer_id]
-        self._forward_history = [h for h in self._forward_history if h[0] != layer_id]
-        self._layer_positions.pop(layer_id, None)
-        self.back_btn.setEnabled(bool(self._history))
-        self.forward_btn.setEnabled(bool(self._forward_history))
-
-        if layer_id != self._current_layer_id:
-            return
-
-        # Tear down the form NOW while the layer is still alive.
-        if getattr(self, '_multi_edit_mode', False):
-            # Discard multi-edit form without saving — no user confirmation possible here.
-            self._multi_edit_mode = False
-            self._multi_label.setVisible(False)
-            self.feature_spin.setVisible(True)
-            self._multi_edit_buttons.setVisible(False)
-            self._feature_form = None  # prevent _remove_current_form from auto-saving
-        self._remove_current_form()
-        self._current_layer_id = None
-        self.feature_ids = []
-        self.current_index = -1
-        self._form_placeholder.setText("No feature selected")
-        self._form_placeholder.setVisible(True)
-        self._update_display()
+    def _disconnect_layer(self):
+        connections, self._layer_connections = self._layer_connections, []
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
 
     def _on_layer_changed(self, layer):
-        # Discard any active multi-edit form without saving when switching layers.
-        if getattr(self, '_multi_edit_mode', False):
-            self._multi_edit_mode = False
-            self._multi_label.setVisible(False)
-            self.feature_spin.setVisible(True)
-            self._multi_edit_buttons.setVisible(False)
-            self._feature_form = None  # prevent _remove_current_form from auto-saving
-        # Save position for the previous layer
-        if self._current_layer_id and self.feature_ids and self.current_index >= 0:
-            fid = self.feature_ids[self.current_index]
-            self._layer_positions[self._current_layer_id] = (self.current_index, fid)
+        layer = layer if isinstance(layer, QgsVectorLayer) else None
+        if layer is not None and layer is self._layer:
+            return
+        if self._layer is not None:
+            self._remember_position()
+            self._leave_multi_edit()
+            self._accept_current_form()
+            self._disconnect_layer()
 
-        # Disconnect selection signal from old layer
-        old_layer = (
-            QgsProject.instance().mapLayer(self._current_layer_id)
-            if self._current_layer_id else None
-        )
-        if isinstance(old_layer, QgsVectorLayer):
-            try:
-                old_layer.selectionChanged.disconnect(self._on_selection_changed)
-            except Exception:
-                pass
-            try:
-                old_layer.editingStarted.disconnect(self._update_edit_buttons)
-            except Exception:
-                pass
-            try:
-                old_layer.editingStopped.disconnect(self._update_edit_buttons)
-            except Exception:
-                pass
-            try:
-                old_layer.attributeValueChanged.disconnect(self._on_attribute_value_changed)
-            except Exception:
-                pass
-
-        # Layer changed — drop any cached form for the previous layer and
-        # clear any locked selection (it belongs to that layer).
+        self._structure_timer.stop()
+        self._refresh_timer.stop()
+        self._pending_deleted.clear()
+        self._pending_full_reload = False
         self._remove_current_form()
-        self._locked_selection_ids = None
-        self.lock_selection_btn.blockSignals(True)
-        self.lock_selection_btn.setChecked(False)
-        self.lock_selection_btn.blockSignals(False)
+        self._multi_panel.clear()
+        self._clear_highlight()
 
-        self._current_layer_id = layer.id() if isinstance(layer, QgsVectorLayer) else None
-
-        self.sort_field_combo.blockSignals(True)
-        self.sort_field_combo.clear()
+        self._layer = layer
+        self._layer_id = layer.id() if layer is not None else None
         self.feature_ids = []
         self.current_index = -1
+        self._last_fid = None
+        self._last_index = -1
+        self._passive_count = 0
+        self._form_error = None
+        self._seen_before = False
+        self._stale_sort = set()
+        self._sort_keys = {}
+        self._visited.load(layer)
+        self._hidden_fields = load_hidden_fields(layer)
+        self._field_order = load_field_order(layer)
+        self._multi_panel.set_hidden_fields(self._hidden_fields)
+        self._multi_panel.set_field_order(self._field_order)
+        self._recount_fields()
 
-        if isinstance(layer, QgsVectorLayer):
+        self._populate_sort_combo(
+            self._layer_sort_fields.get(self._layer_id) if layer else None)
+        self._find_bar.set_layer(layer)
+        if layer is not None:
+            self._connect_layer(layer)
+            self.feature_ids = self._query_feature_ids()
+        self._restore_initial_position()
+
+    def _remember_position(self):
+        fid = self._current_fid()
+        if fid is None:
+            fid = self._last_fid
+        if fid is not None and self._layer_id:
+            self._layer_positions[self._layer_id] = fid
+
+    def _restore_initial_position(self):
+        """Pick the starting feature after a layer is loaded."""
+        layer = self._layer
+        if layer is None or not self.feature_ids:
+            self._update_display()
+            return
+        # Follow an existing selection, unless navigation is locked.
+        if not self._lock_navigation and layer.selectedFeatureCount() > 0:
+            self._sync_with_selection()
+            return
+        saved = self._layer_positions.get(self._layer_id)
+        idx = self._index_of(saved) if saved is not None else -1
+        if idx >= 0:
+            self.current_index = idx
+            self._navigate_to_current()
+            return
+        self.current_index = -1
+        self._update_display()
+
+    def _populate_sort_combo(self, sort_field=None):
+        layer = self._layer
+        self.sort_field_combo.blockSignals(True)
+        self.sort_field_combo.clear()
+        if layer is not None:
             self.sort_field_combo.addItem("(Feature ID)", None)
-            tooltip_role = getattr(Qt, 'ToolTipRole', None)
-            if tooltip_role is None:
-                tooltip_role = Qt.ItemDataRole.ToolTipRole
             fields = layer.fields()
             for i, field in enumerate(fields):
-                type_name = field.typeName() or ""
-                # Use QGIS's native field-type icon (same as attribute table /
-                # native sort combos) so the dropdown matches QGIS look & feel.
                 icon = None
                 try:
                     icon = fields.iconForField(i)
                 except Exception:
-                    icon = None
+                    pass
                 if icon is not None and not icon.isNull():
                     self.sort_field_combo.addItem(icon, field.name(), field.name())
                 else:
                     self.sort_field_combo.addItem(field.name(), field.name())
-                try:
-                    idx = self.sort_field_combo.count() - 1
-                    self.sort_field_combo.setItemData(
-                        idx,
-                        f"{field.name()} ({type_name})" if type_name else field.name(),
-                        tooltip_role,
-                    )
-                except Exception:
-                    pass
-            self.filter_expression.setLayer(layer)
-            self.filter_expression.setExpression('')
-            self.search_field_combo.clear()
-            for field in layer.fields():
-                self.search_field_combo.addItem(field.name(), field.name())
-            self.search_value_edit.clear()
-            self._populate_search_values()
-            layer.selectionChanged.connect(self._on_selection_changed)
-            # Wire editing-state to enable/disable Duplicate/Delete buttons.
-            try:
-                layer.editingStarted.connect(self._update_edit_buttons)
-            except Exception:
-                pass
-            try:
-                layer.editingStopped.connect(self._update_edit_buttons)
-            except Exception:
-                pass
-            try:
-                layer.attributeValueChanged.connect(self._on_attribute_value_changed)
-            except Exception:
-                pass
-        else:
-            self.filter_expression.setLayer(None)
-            self.search_field_combo.clear()
-            self.search_value_edit.clear()
-            self._search_completer.model().setStringList([])
-
+                type_name = field.typeName() or ""
+                self.sort_field_combo.setItemData(
+                    self.sort_field_combo.count() - 1,
+                    f"{field.name()} ({type_name})" if type_name else field.name(),
+                    TOOLTIP_ROLE,
+                )
+            if sort_field:
+                idx = self.sort_field_combo.findData(sort_field)
+                if idx >= 0:
+                    self.sort_field_combo.setCurrentIndex(idx)
         self.sort_field_combo.blockSignals(False)
-        self._reload_features()
 
-        # Restore saved position for this layer
-        if self._current_layer_id and self._current_layer_id in self._layer_positions:
-            saved_index, saved_fid = self._layer_positions[self._current_layer_id]
-            if saved_fid in self.feature_ids:
-                self.current_index = self.feature_ids.index(saved_fid)
-            elif 0 <= saved_index < len(self.feature_ids):
-                self.current_index = saved_index
-            if self.current_index >= 0:
-                self._navigate_to_current()
-
-    # =========================================================================
-    # SORTING AND LOADING
-    # =========================================================================
-
-    def _reload_features(self):
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer):
-            self.feature_ids = []
-            self.current_index = -1
-            self._update_display()
+    def _on_layer_will_be_removed(self, layer_id):
+        if not isinstance(layer_id, str):
+            try:
+                layer_id = layer_id.id()
+            except Exception:
+                return
+        self._layer_positions.pop(layer_id, None)
+        self._layer_sort_fields.pop(layer_id, None)
+        if layer_id != self._layer_id:
             return
+        # The layer is still alive here: drop everything that points at it.
+        # Pending edits are not pushed — QGIS has already asked the user.
+        self._structure_timer.stop()
+        self._refresh_timer.stop()
+        self._field_visibility_timer.stop()
+        self._multi_edit_mode = False
+        self._multi_panel.clear()
+        self._clear_highlight()
+        self._remove_current_form()
+        self._disconnect_layer()
+        self._layer = None
+        self._layer_id = None
+        self.feature_ids = []
+        self.current_index = -1
+        self._last_fid = None
+        self._last_index = -1
+        self._passive_count = 0
+        self._pending_deleted.clear()
+        self._pending_full_reload = False
+        self._hidden_fields = set()
+        self._field_order = []
+        self._sort_keys = {}
+        self._stale_sort = set()
+        self._visited.load(None)
+        self._recount_fields()
+        self._find_bar.set_layer(None)
+        self._update_display()
 
+    def _on_fields_updated(self, *args):
+        layer = self._layer
+        if layer is None:
+            return
         sort_field = self.sort_field_combo.currentData()
-        filter_expr = self.filter_expression.expression()
+        self._populate_sort_combo(sort_field)
+        self._find_bar.refresh_fields()
+        self._recount_fields()
+        if self.sort_field_combo.currentData() != sort_field:
+            self._reload_features()
+        if self._multi_edit_mode:
+            self._multi_panel.set_target(
+                layer, layer.selectedFeatureIds(), force_rebuild=True)
+        # The native form rebuilds its widgets after this signal: re-apply
+        # our field order and hidden fields once it has.
+        self._field_visibility_timer.start()
 
-        from qgis.core import QgsFeatureRequest, QgsExpression
+    # =========================================================================
+    # FEATURE LIST
+    # =========================================================================
+
+    def _current_fid(self):
+        if 0 <= self.current_index < len(self.feature_ids):
+            return self.feature_ids[self.current_index]
+        return None
+
+    def _index_of(self, fid):
+        try:
+            return self.feature_ids.index(fid)
+        except ValueError:
+            return -1
+
+    def _anchor_index(self):
+        """Position to resume from when no feature is active."""
+        if not self.feature_ids:
+            return -1
+        if self._last_fid is not None:
+            idx = self._index_of(self._last_fid)
+            if idx >= 0:
+                return idx
+        if self._last_index >= 0:
+            return min(self._last_index, len(self.feature_ids) - 1)
+        return -1
+
+    def _fetch_sort_values(self):
+        """``{fid: sort value}`` for every feature (None for NULL)."""
+        layer = self._layer
+        if layer is None:
+            return {}
+        sort_field = self.sort_field_combo.currentData()
+        if sort_field and layer.fields().indexOf(sort_field) < 0:
+            sort_field = None
         request = QgsFeatureRequest()
-
-        # Apply expression filter if valid
-        if filter_expr and not QgsExpression(filter_expr).hasParserError():
-            request.setFilterExpression(filter_expr)
-        elif sort_field:
+        if sort_field:
             request.setSubsetOfAttributes([sort_field], layer.fields())
         else:
             request.setNoAttributes()
-
-        try:
-            request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
-        except AttributeError:
-            request.setFlags(QgsFeatureRequest.NoGeometry)
-
-        entries = []
+        request.setFlags(NO_GEOMETRY)
+        values = {}
         for feat in layer.getFeatures(request):
             if sort_field:
-                val = feat[sort_field]
-                sort_key = None if (val is None or val == NULL) else val
+                value = feat[sort_field]
+                values[feat.id()] = None if is_null(value) else value
             else:
-                sort_key = feat.id()
-            entries.append((feat.id(), sort_key))
+                values[feat.id()] = feat.id()
+        return values
 
+    def _sorted_ids(self, keys):
+        values = [(value, fid) for fid, value in keys.items() if value is not None]
+        nulls = sorted(fid for fid, value in keys.items() if value is None)
+        reverse = not self.sort_ascending
         try:
-            entries.sort(
-                key=lambda x: (x[1] is not None, x[1]),
-                reverse=not self.sort_ascending
-            )
+            values.sort(reverse=reverse)
         except TypeError:
-            entries.sort(
-                key=lambda x: (
-                    x[1] is not None,
-                    str(x[1]) if x[1] is not None else ''
-                ),
-                reverse=not self.sort_ascending
-            )
+            values.sort(key=lambda e: (str(e[0]), e[1]), reverse=reverse)
+        ordered = [fid for _, fid in values]
+        # NULL counts as the smallest value: first when ascending, last when
+        # descending (handy for finding features with missing values).
+        return nulls + ordered if self.sort_ascending else ordered + nulls
 
-        self.feature_ids = [e[0] for e in entries]
+    def _query_feature_ids(self):
+        """Fresh, sorted list. This is the only place the order is decided
+        from current values (layer load, sort change, reload / re-sort)."""
+        self._sort_keys = self._fetch_sort_values()
+        self._stale_sort = set()
+        self._update_resort_button()
+        return self._sorted_ids(self._sort_keys)
 
-        # Filter to selected features only
-        if self.selected_only_cb.isChecked():
-            if self._locked_selection_ids is not None:
-                selected = self._locked_selection_ids
-            else:
-                selected = set(layer.selectedFeatureIds())
-            self.feature_ids = [fid for fid in self.feature_ids if fid in selected]
+    def _merge_feature_ids(self):
+        """Pick up added / restored features without reordering anything.
 
-        if self.feature_ids:
-            # Start at NA state when the layer has nothing currently selected
-            # (e.g. on initial layer load).  Once the user selects a feature or
-            # presses a nav button the NA label is replaced by the live position.
-            _layer_now = self.layer_combo.currentLayer()
-            _n_sel = (
-                len(_layer_now.selectedFeatureIds())
-                if isinstance(_layer_now, QgsVectorLayer) else 0
-            )
-            self.current_index = 0 if _n_sel > 0 else -1
+        Every feature keeps the sort value it had when the list was built,
+        so edits never move it and an undone delete returns to exactly the
+        same place. Only features we have never seen use their current value.
+        """
+        current = self._fetch_sort_values()
+        for fid, value in current.items():
+            self._sort_keys.setdefault(fid, value)
+        self._stale_sort &= set(current)
+        self._update_resort_button()
+        return self._sorted_ids({fid: self._sort_keys[fid] for fid in current})
+
+    def _track_sort_change(self, fid, idx, value):
+        sort_field = self.sort_field_combo.currentData()
+        layer = self._layer
+        if not sort_field or layer is None or fid not in self._sort_keys:
+            return
+        if layer.fields().indexOf(sort_field) != idx:
+            return
+        if values_equal(None if is_null(value) else value, self._sort_keys[fid]):
+            self._stale_sort.discard(fid)
         else:
+            self._stale_sort.add(fid)
+        self._update_resort_button()
+
+    def _update_resort_button(self):
+        self.resort_btn.setVisible(bool(self._stale_sort))
+
+    def _reload_features(self, *args):
+        """Rebuild the list (sort/filter change), keeping the current feature."""
+        self._structure_timer.stop()
+        self._pending_deleted.clear()
+        self._pending_full_reload = False
+        current = self._current_fid()
+        self.feature_ids = self._query_feature_ids()
+        idx = self._index_of(current) if current is not None else -1
+        if idx >= 0:
+            self.current_index = idx
+        elif current is not None:
+            # Filtered out: park in the NA state, ready to resume nearby.
+            self._last_fid = current
+            self._last_index = self.current_index
             self.current_index = -1
-        if not self._navigating_back:
-            self._navigate_to_current()
+            self._clear_highlight()
+        self._update_display()
+
+    def _on_sort_field_changed(self, *args):
+        if self._layer_id:
+            self._layer_sort_fields[self._layer_id] = self.sort_field_combo.currentData()
+        self._reload_features()
 
     def _toggle_sort_order(self):
         self.sort_ascending = not self.sort_ascending
-        if self.sort_ascending:
-            self.sort_order_btn.setIcon(
-                QgsApplication.getThemeIcon('/mActionArrowUp.svg')
-            )
-            self.sort_order_btn.setToolTip("Ascending — click to toggle")
-        else:
-            self.sort_order_btn.setIcon(
-                QgsApplication.getThemeIcon('/mActionArrowDown.svg')
-            )
-            self.sort_order_btn.setToolTip("Descending — click to toggle")
+        self._update_sort_button()
         self._save_settings()
         self._reload_features()
 
-    # =========================================================================
-    # NAVIGATION
-    # =========================================================================
-
-    def _go_first(self):
-        if self._multi_edit_mode:
-            return
-        if self.feature_ids:
-            self._push_history()
-            self._accept_current_form()
-            self.current_index = 0
-            self._navigate_to_current()
-
-    def _go_prev(self):
-        if self._multi_edit_mode:
-            return
-        if not self.feature_ids:
-            return
-        self._push_history()
-        self._accept_current_form()
-        if self.current_index <= 0:
-            # From NA state or already at first feature → wrap to last.
-            self.current_index = len(self.feature_ids) - 1
+    def _update_sort_button(self):
+        if self.sort_ascending:
+            self.sort_order_btn.setIcon(QgsApplication.getThemeIcon('/mActionArrowUp.svg'))
+            self.sort_order_btn.setToolTip("Ascending — click to toggle")
         else:
-            self.current_index -= 1
-        self._navigate_to_current()
+            self.sort_order_btn.setIcon(QgsApplication.getThemeIcon('/mActionArrowDown.svg'))
+            self.sort_order_btn.setToolTip("Descending — click to toggle")
 
-    def _go_next(self):
-        if self._multi_edit_mode:
-            return
-        if self.feature_ids and self.current_index < len(self.feature_ids) - 1:
-            self._push_history()
-            self._accept_current_form()
-            self.current_index += 1
-            self._navigate_to_current()
+    # --- keeping the list in sync with the layer ---------------------------
 
-    def _go_last(self):
-        if self._multi_edit_mode:
-            return
-        if self.feature_ids:
-            self._push_history()
-            self._accept_current_form()
-            self.current_index = len(self.feature_ids) - 1
-            self._navigate_to_current()
+    def _on_features_deleted(self, fids):
+        self._pending_deleted.update(fids)
+        self._structure_timer.start()
 
-    def _go_to_feature_number(self, number):
-        """Jump to a 1-based feature number typed in the spinbox."""
-        if self._multi_edit_mode:
-            return
-        idx = number - 1
-        if self.feature_ids and 0 <= idx < len(self.feature_ids) and idx != self.current_index:
-            self._push_history()
-            self._accept_current_form()
-            self.current_index = idx
-            self._navigate_to_current()
+    def _on_feature_added(self, *args):
+        self._pending_full_reload = True
+        self._structure_timer.start()
 
-    def _on_filter_changed(self, *args):
-        """Reload features when the filter expression changes.
+    def _schedule_full_resync(self, *args):
+        self._pending_full_reload = True
+        self._structure_timer.start()
 
-        Also hides the 'Selected only' checkbox and lock button while a filter
-        expression is active — combining both filters is not useful and
-        confusing, so we remove that option when a filter is set.
-        """
-        expr = self.filter_expression.expression()
-        has_filter = bool(expr and expr.strip())
-        # Show/hide the "Selected only" row based on whether a filter is active.
-        self.selected_only_cb.setVisible(not has_filter)
-        self.lock_selection_btn.setVisible(not has_filter)
-        if has_filter and self.selected_only_cb.isChecked():
-            # Silently uncheck so the filter operates on all features.
-            self.selected_only_cb.blockSignals(True)
-            self.selected_only_cb.setChecked(False)
-            self.selected_only_cb.blockSignals(False)
-        if not expr:
-            self._reload_features()
-            return
-        from qgis.core import QgsExpression
-        if not QgsExpression(expr).hasParserError():
-            self._reload_features()
+    def _flush_structure_changes(self):
+        if self._structure_timer.isActive():
+            self._structure_timer.stop()
+            self._process_structure_changes()
 
-    def _on_selection_changed(self):
-        """React to layer selection changes.
-
-        * 2+ features selected  → enter multi-edit mode (OK/Cancel form).
-        * 0-1 features selected → exit multi-edit if active, then handle
-          'Selected only' reload and 'Go to selected' single-feature jump.
-        Guards against re-entrancy because ``_navigate_to_current()`` itself
-        calls ``layer.selectByIds()``, which fires ``selectionChanged``.
-        """
-        if getattr(self, '_suppress_selection_jump', False):
+    def _process_structure_changes(self):
+        layer = self._layer
+        deleted, self._pending_deleted = self._pending_deleted, set()
+        full, self._pending_full_reload = self._pending_full_reload, False
+        if layer is None:
             return
 
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer):
+        current = self._current_fid()
+        old_index = self.current_index
+        remap, self._fid_remap = self._fid_remap, {}
+        if self._last_fid in remap:
+            self._last_fid = remap[self._last_fid]
+        for old, new in remap.items():
+            if old in self._sort_keys:
+                self._sort_keys.setdefault(new, self._sort_keys[old])
+            if old in self._visited:
+                self._visited.mark(new)
+        if full:
+            self.feature_ids = self._merge_feature_ids()
+        elif deleted:
+            self.feature_ids = [f for f in self.feature_ids if f not in deleted]
+            self._stale_sort -= deleted
+            self._update_resort_button()
+        else:
             return
 
-        selected_ids = layer.selectedFeatureIds()
-
-        # ── Multi-select: enter or refresh multi-edit mode ──────────────────
-        if len(selected_ids) >= 2:
-            if layer.isEditable():
-                # Full multi-edit: interactive form + OK/Cancel bar.
-                self._passive_multi_indicator = False
-                self._enter_multi_edit_mode(layer, selected_ids)
+        if current in remap and self._index_of(remap[current]) >= 0:
+            # Saved: the new feature got its permanent id - stay on it.
+            self.current_index = self._index_of(remap[current])
+            self._follow_current(layer)
+        elif current is None:
+            self._update_display()
+        elif self._index_of(current) >= 0:
+            self.current_index = self._index_of(current)
+            self._update_display()
+        elif current in deleted and self.feature_ids:
+            # The feature on screen was deleted (panel button, Del key,
+            # attribute table, ...): move on to the one that took its place.
+            self.current_index = min(old_index, len(self.feature_ids) - 1)
+            if self._multi_edit_mode:
+                self._update_display()
             else:
-                # Passive indicator: show M(n) in the counter without
-                # entering edit mode or touching the rest of the panel.
-                self._passive_multi_indicator = True
-                self.feature_spin.setVisible(False)
-                self._multi_label.setText(f"M ({len(selected_ids)})")
-                self._multi_label.setVisible(True)
-            return
-
-        # ── Single / no selection: clear any active multi state ─────────────
-        _had_passive = self._passive_multi_indicator
-        self._passive_multi_indicator = False
-
-        if self._multi_edit_mode:
-            self._exit_multi_edit_mode()
-        elif _had_passive:
-            # Restore the normal counter (spinbox + total label).
-            self._update_display()
-
-        if self.selected_only_cb.isChecked() and self._locked_selection_ids is None:
-            self._reload_features()
-            return
-
-        if not selected_ids:
-            # 0 features selected → NA state (blank form, nav active).
+                self._navigate_to_current(save_pending=False)
+        else:
+            # Gone for another reason (e.g. a new feature got a real id on
+            # commit): don't jump to an unrelated feature.
+            self._last_fid = None
+            self._last_index = old_index
             self.current_index = -1
+            self._clear_highlight()
             self._update_display()
-            return
 
-        # Use the first selected fid. Skip if it's already the current feature.
-        target_fid = selected_ids[0]
-        if (0 <= self.current_index < len(self.feature_ids)
-                and self.feature_ids[self.current_index] == target_fid):
+        if full and self._multi_edit_mode:
+            selected = layer.selectedFeatureIds()
+            if len(selected) >= 2 and layer.isEditable():
+                self._multi_panel.set_target(layer, selected)
+            else:
+                self._sync_with_selection()
+
+    def _follow_current(self, layer):
+        """Point the form/highlight at the current id without re-zooming."""
+        fid = self._current_fid()
+        feat = layer.getFeature(fid)
+        self._last_fid = fid
+        self._last_index = self.current_index
+        if feat.isValid():
+            self._show_feature_form(layer, feat, save_pending=False)
+            self._update_highlight(feat)
+        self._update_measurements(feat)
+        self._update_display()
+
+    def _on_before_commit_changes(self, *args):
+        self._on_before_commit()
+        # Remember a new (temporary id) feature so we can follow it to the
+        # id it gets once committed.
+        self._commit_snapshot = None
+        layer = self._layer
+        fid = self._current_fid()
+        if fid is None:
+            fid = self._last_fid
+        if layer is not None and fid is not None and fid < 0:
+            feat = layer.getFeature(fid)
+            if feat.isValid():
+                self._commit_snapshot = feat
+
+    def _on_committed_features_added(self, layer_id, features):
+        snapshot, self._commit_snapshot = self._commit_snapshot, None
+        layer = self._layer
+        if snapshot is None or layer is None or layer_id != self._layer_id:
             return
-        if target_fid not in self.feature_ids:
-            # Feature may have been created by an external operation (e.g. merge).
-            # Reload the feature list and try once more.
-            self._navigating_back = True
-            self._reload_features()
-            self._navigating_back = False
-            if target_fid not in self.feature_ids:
-                return
-        self._push_history()
-        self._accept_current_form()
-        self.current_index = self.feature_ids.index(target_fid)
-        self._suppress_selection_jump = True
         try:
-            self._navigate_to_current()
-        finally:
-            self._suppress_selection_jump = False
+            skip = set(layer.primaryKeyAttributes())   # e.g. GeoPackage fid
+        except Exception:
+            skip = set()
 
-    def _on_attribute_value_changed(self, fid, field_idx, value):
-        """Live-refresh the form when the current feature's attributes change externally.
+        def comparable(feat):
+            return [v for i, v in enumerate(feat.attributes()) if i not in skip]
 
-        Fires on every ``QgsVectorLayer.attributeValueChanged`` signal.  We
-        skip updates that we ourselves triggered (``_form_saving`` guard) to
-        avoid a feedback loop, and skip multi-edit
-        mode (its form handles its own state).  When an external operation
-        (e.g. QGIS Merge Selected Features, attribute-table edit, processing
-        tool) changes the displayed feature, we re-fetch it and call
-        ``form.setFeature()`` so the widgets reflect the new values immediately.
-        """
+        wanted = comparable(snapshot)
+        for feat in features:
+            candidate = comparable(feat)
+            if (len(candidate) == len(wanted)
+                    and all(values_equal(a, b) for a, b in zip(candidate, wanted))
+                    and _same_geometry(feat, snapshot)):
+                self._fid_remap[snapshot.id()] = feat.id()
+                return
+
+    def _on_attribute_value_changed(self, fid, idx=None, value=None, *args):
+        self._track_sort_change(fid, idx, value)
         if self._form_saving:
             return
         if self._multi_edit_mode:
+            if fid in self._multi_panel.fids:
+                self._refresh_timer.start()
+        elif fid == self._current_fid():
+            self._refresh_timer.start()
+
+    def _refresh_from_layer(self):
+        """Show external edits (undo, field calculator, table, ...) on screen."""
+        layer = self._layer
+        if layer is None:
             return
-        if (self.current_index < 0
-                or not self.feature_ids
-                or self.feature_ids[self.current_index] != fid):
+        if self._multi_edit_mode:
+            self._multi_panel.refresh_baseline()
             return
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer):
-            return
+        fid = self._current_fid()
         form = self._feature_form
-        if form is None or self._feature_form_layer_id != layer.id():
+        if fid is None or form is None or self._feature_form_layer_id != layer.id():
             return
         feat = layer.getFeature(fid)
         if not feat.isValid():
             return
-        # Set _form_saving so that any widget-change signals emitted by
-        # setFeature() don't re-enter this handler.
         self._form_saving = True
         try:
             form.setFeature(feat)
@@ -1101,919 +765,1091 @@ class FeatureNavEdDockWidget(QDockWidget):
             pass
         finally:
             self._form_saving = False
+        if self._hidden_fields:
+            apply_to_attribute_form(form, layer, self._hidden_fields)
+        self._update_measurements(feat)
+        self._update_display()
 
-    def _push_history(self):
-        """Push the current feature position onto the navigation history stack."""
-        if self.current_index < 0 or not self.feature_ids or not self._current_layer_id:
+    def _on_geometry_changed(self, fid, *args):
+        if fid != self._current_fid():
             return
-        fid = self.feature_ids[self.current_index]
-        entry = (self._current_layer_id, fid)
-        if self._history and self._history[-1] == entry:
-            return
-        self._history.append(entry)
-        # Branching from here — discard any forward history.
-        self._forward_history.clear()
-        self.back_btn.setEnabled(True)
-        self.forward_btn.setEnabled(False)
+        if self._highlight is not None:
+            self._update_highlight()
+        self._update_measurements()
+        self._update_content()
+        self._update_toolbar_state()
 
-    def _go_back(self):
-        """Navigate back to the previously viewed feature."""
-        if not self._history:
-            return
-
-        # Save current position to forward stack before navigating back.
-        if self.current_index >= 0 and self.feature_ids and self._current_layer_id:
-            fwd_entry = (self._current_layer_id, self.feature_ids[self.current_index])
-            if not self._forward_history or self._forward_history[-1] != fwd_entry:
-                self._forward_history.append(fwd_entry)
-                self.forward_btn.setEnabled(True)
-
-        layer_id, fid = self._history.pop()
-        self.back_btn.setEnabled(bool(self._history))
-
-        target_layer = QgsProject.instance().mapLayer(layer_id)
-        if not isinstance(target_layer, QgsVectorLayer):
-            # Layer no longer exists — keep popping
-            if self._history:
-                self._go_back()
-            return
-
-        self._navigating_back = True
-        if self.layer_combo.currentLayer() != target_layer:
-            self.layer_combo.setLayer(target_layer)
-            # _on_layer_changed → _reload_features populates feature_ids
-            # but skips auto-navigate because _navigating_back is True
-
-        if fid in self.feature_ids:
-            self.current_index = self.feature_ids.index(fid)
-            self._navigate_to_current()
-        self._navigating_back = False
-
-    def _go_forward(self):
-        """Navigate forward to the next viewed feature (reverse of go-back)."""
-        if not self._forward_history:
-            return
-
-        # Save current position to back stack before navigating forward.
-        if self.current_index >= 0 and self.feature_ids and self._current_layer_id:
-            entry = (self._current_layer_id, self.feature_ids[self.current_index])
-            if not self._history or self._history[-1] != entry:
-                self._history.append(entry)
-                self.back_btn.setEnabled(True)
-
-        layer_id, fid = self._forward_history.pop()
-        self.forward_btn.setEnabled(bool(self._forward_history))
-
-        target_layer = QgsProject.instance().mapLayer(layer_id)
-        if not isinstance(target_layer, QgsVectorLayer):
-            # Layer no longer exists — keep popping forward
-            if self._forward_history:
-                self._go_forward()
-            return
-
-        self._navigating_back = True
-        if self.layer_combo.currentLayer() != target_layer:
-            self.layer_combo.setLayer(target_layer)
-
-        if fid in self.feature_ids:
-            self.current_index = self.feature_ids.index(fid)
-            self._navigate_to_current()
-        self._navigating_back = False
+    def _on_subset_changed(self, *args):
+        self._reload_features()
 
     # =========================================================================
-    # FIND / GO TO
+    # NAVIGATION
     # =========================================================================
 
-    def _populate_search_values(self):
-        """Populate the completer with unique values from the selected search field."""
-        field_name = self.search_field_combo.currentData()
-        layer = self.layer_combo.currentLayer()
-        if not field_name or not isinstance(layer, QgsVectorLayer):
-            self._search_completer.model().setStringList([])
+    def _go_to_index(self, idx):
+        self._flush_structure_changes()
+        if self._multi_edit_mode or not self.feature_ids:
             return
-        idx = layer.fields().indexOf(field_name)
-        if idx < 0:
-            self._search_completer.model().setStringList([])
+        idx = max(0, min(idx, len(self.feature_ids) - 1))
+        if idx == self.current_index and self._passive_count < 2:
             return
-        values = layer.uniqueValues(idx)
-        strings = sorted(
-            str(v) for v in values if v is not None and v != NULL
-        )
-        self._search_completer.model().setStringList(strings)
+        self.current_index = idx
+        self._navigate_to_current()
 
-    def _go_next_match(self):
-        """Jump to the next feature matching the search expression."""
-        self._find_match(forward=True)
+    def _go_first(self):
+        self._go_to_index(0)
 
-    def _go_prev_match(self):
-        """Jump to the previous feature matching the search expression."""
-        self._find_match(forward=False)
+    def _go_last(self):
+        self._go_to_index(len(self.feature_ids) - 1)
 
-    def _find_match(self, forward=True):
-        """Find and navigate to the next/previous feature matching the search field + value."""
-        search_field = self.search_field_combo.currentData()
-        search_value = self.search_value_edit.text().strip()
-        if not search_field or not search_value:
+    def _go_next(self):
+        self._flush_structure_changes()
+        if not self.feature_ids:
             return
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer) or not self.feature_ids:
+        if self.current_index >= 0:
+            if self.current_index + 1 < len(self.feature_ids):
+                self._go_to_index(self.current_index + 1)
+            return
+        anchor = self._anchor_index()
+        self._go_to_index(anchor + 1 if anchor >= 0 else 0)
+
+    def _go_prev(self):
+        self._flush_structure_changes()
+        if not self.feature_ids:
+            return
+        if self.current_index >= 0:
+            if self.current_index > 0:
+                self._go_to_index(self.current_index - 1)
+            return
+        anchor = self._anchor_index()
+        self._go_to_index(anchor - 1 if anchor > 0 else
+                          (0 if anchor == 0 else len(self.feature_ids) - 1))
+
+    def _go_to_feature_number(self, number):
+        if number >= 1:
+            self._go_to_index(number - 1)
+
+    def _on_placeholder_link(self, link):
+        if link == 'resume':
+            anchor = self._anchor_index()
+            if anchor >= 0:
+                self._go_to_index(anchor)
+
+    def _navigate_to_current(self, select=True, save_pending=True):
+        """Show the feature at ``current_index``: select, zoom, form, highlight."""
+        layer = self._layer
+        fid = self._current_fid()
+        if layer is None or fid is None:
+            self._update_display()
+            return
+        feat = layer.getFeature(fid)
+        if not feat.isValid():
+            # Stale entry - drop it on the next sync.
+            self._pending_deleted.add(fid)
+            self._structure_timer.start()
+            self._update_display()
             return
 
-        total = len(self.feature_ids)
-        start = self.current_index
-        step = 1 if forward else -1
+        self._last_fid = fid
+        self._last_index = self.current_index
+        self._seen_before = fid in self._visited
+        if self.track_visited_cb.isChecked():
+            self._visited.mark(fid)
+        if select:
+            self._select_only(layer, fid)
+            self._passive_count = 0
+        if feat.hasGeometry():
+            if self.auto_zoom_cb.isChecked():
+                self._zoom_to_feature(feat, layer)
+            if self.enable_flash_cb.isChecked():
+                self._flash_geometry(feat, layer)
+        self._show_feature_form(layer, feat, save_pending)
+        self._update_highlight(feat)
+        self._update_measurements(feat)
+        self._update_display()
 
-        for offset in range(1, total + 1):
-            idx = (start + offset * step) % total
-            fid = self.feature_ids[idx]
-            feat = layer.getFeature(fid)
-            if not feat.isValid():
-                continue
-            val = feat[search_field]
-            if val is None or val == NULL:
-                continue
-            if str(val) == search_value:
-                self._push_history()
-                self._accept_current_form()
-                self.current_index = idx
-                self._navigate_to_current()
-                return
-
-    # =========================================================================
-    # PICK FROM MAP
-    # =========================================================================
-
-    def _toggle_pick_mode(self, active):
-        """Activate or deactivate the map pick tool."""
-        canvas = self.iface.mapCanvas()
-        if active:
-            layer = self.layer_combo.currentLayer()
-            if not isinstance(layer, QgsVectorLayer):
-                self.pick_btn.setChecked(False)
-                return
-            self._prev_map_tool = canvas.mapTool()
-            self._pick_tool = QgsMapToolIdentifyFeature(canvas, layer)
-            self._pick_tool.setCursor(QgsApplication.getThemeCursor(QgsApplication.Cursor.Identify))
-            self._pick_tool.featureIdentified.connect(self._on_feature_picked)
-            canvas.setMapTool(self._pick_tool)
-            canvas.mapToolSet.connect(self._on_map_tool_changed)
-        else:
-            self._deactivate_pick_tool()
-
-    def _on_feature_picked(self, feature):
-        """Handle a feature clicked on the map."""
-        fid = feature.id()
-        if fid in self.feature_ids:
-            self._push_history()
-            self._accept_current_form()
-            self.current_index = self.feature_ids.index(fid)
-            self._navigate_to_current()
-
-    def _on_map_tool_changed(self, new_tool):
-        """Uncheck pick button when user switches to another map tool."""
-        if new_tool is not self._pick_tool:
-            try:
-                self.iface.mapCanvas().mapToolSet.disconnect(self._on_map_tool_changed)
-            except Exception:
-                pass
-            self.pick_btn.blockSignals(True)
-            self.pick_btn.setChecked(False)
-            self.pick_btn.blockSignals(False)
-
-    def _deactivate_pick_tool(self):
-        """Restore previous map tool and clean up."""
-        canvas = self.iface.mapCanvas()
+    def _select_only(self, layer, fid):
+        if list(layer.selectedFeatureIds()) == [fid]:
+            return
+        self._suppress_selection = True
         try:
-            canvas.mapToolSet.disconnect(self._on_map_tool_changed)
+            layer.selectByIds([fid])
+        finally:
+            self._suppress_selection = False
+
+    def _scale_mode(self):
+        return self.scale_mode_combo.currentData() or 'keep'
+
+    def _zoom_to_feature(self, feature, layer):
+        geom = feature.geometry()
+        if geom is None or geom.isEmpty():
+            return
+        canvas = self.iface.mapCanvas()
+        settings = canvas.mapSettings()
+        mode = self._scale_mode()
+        if mode == 'fit':
+            try:
+                extent = settings.layerExtentToOutputExtent(layer, geom.boundingBox())
+            except Exception:
+                extent = None
+            if extent is not None and (extent.width() > 0 or extent.height() > 0):
+                if extent.width() == 0 or extent.height() == 0:   # straight line
+                    extent.grow(max(extent.width(), extent.height()) * 0.1)
+                extent.scale(1.2)                                   # margin
+                canvas.setExtent(extent)
+                canvas.refresh()
+                return
+            # A single point has no extent: centre it at the current scale.
+        try:
+            center = settings.layerToMapCoordinates(layer, geom.centroid().asPoint())
+        except Exception:
+            return
+        canvas.setCenter(center)
+        if mode == 'fixed':
+            canvas.zoomScale(self.scale_spin.value())
+        canvas.refresh()
+
+    def _flash_geometry(self, feature, layer):
+        try:
+            self.iface.mapCanvas().flashGeometries([feature.geometry()], layer.crs())
         except Exception:
             pass
-        if self._pick_tool is not None:
-            try:
-                self._pick_tool.featureIdentified.disconnect(self._on_feature_picked)
-            except Exception:
-                pass
-            if canvas.mapTool() is self._pick_tool:
-                if self._prev_map_tool:
-                    canvas.setMapTool(self._prev_map_tool)
-                else:
-                    canvas.unsetMapTool(self._pick_tool)
-            self._pick_tool = None
-        self._prev_map_tool = None
 
     def _flash_current(self):
-        """Re-flash the current feature and optionally re-zoom to it."""
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer) or self.current_index < 0:
+        layer = self._layer
+        fid = self._current_fid()
+        if layer is None or fid is None:
             return
-        fid = self.feature_ids[self.current_index]
         feat = layer.getFeature(fid)
         if not feat.isValid() or not feat.hasGeometry():
             return
         if self.auto_zoom_cb.isChecked():
             self._zoom_to_feature(feat, layer)
-        try:
-            self.iface.mapCanvas().flashGeometries(
-                [feat.geometry()], layer.crs()
-            )
-        except AttributeError:
-            pass
+        self._flash_geometry(feat, layer)
+
+    def _update_scale_controls(self, *args):
+        fixed = self._scale_mode() == 'fixed'
+        self.scale_spin.setEnabled(fixed)
+        self.scale_spin.setToolTip(
+            "Map scale used by auto-zoom" if fixed else
+            "Current map scale (choose Fixed scale to set your own)")
+        if not fixed:
+            self._sync_scale_from_canvas()
+
+    def _on_scale_mode_changed(self, *args):
+        self._update_scale_controls()
+        self._save_settings()
+
+    def _on_canvas_scale_changed(self, scale):
+        if self._scale_mode() != 'fixed':
+            self.scale_spin.blockSignals(True)
+            self.scale_spin.setValue(round(scale))
+            self.scale_spin.blockSignals(False)
+
+    def _sync_scale_from_canvas(self):
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(round(self.iface.mapCanvas().scale()))
+        self.scale_spin.blockSignals(False)
 
     # =========================================================================
-    # MULTI-EDIT  (≥2 features selected)
+    # SELECTION SYNC  (and Lock navigation)
     # =========================================================================
 
-    def _enter_multi_edit_mode(self, layer, selected_ids):
-        """Switch the panel into multi-edit mode for the given selection.
-
-        The embedded form is replaced with a QgsAttributeForm in MultiEditMode.
-        QGIS's native multi-edit UI shows mixed-value indicators for fields
-        that differ across the selection, and only applies changes to fields
-        that the user explicitly modifies.  Changes are NOT committed until the
-        user clicks "Apply to selected" (OK).
-        """
-        n = len(selected_ids)
-        if self._multi_edit_mode:
-            # Already in multi-edit — refresh the form if the selection changed.
-            self._multi_label.setText(f"M ({n})")
-            self._show_multi_edit_form(layer)
+    def _on_selection_changed(self, *args):
+        if self._suppress_selection or self._lock_navigation:
             return
+        self._sync_with_selection()
 
-        self._accept_current_form()
-        self._multi_edit_mode = True
-
-        # Grey out navigation controls.
-        self.first_btn.setEnabled(False)
-        self.prev_btn.setEnabled(False)
-        self.next_btn.setEnabled(False)
-        self.last_btn.setEnabled(False)
-        self.flash_btn.setEnabled(False)
-        self.del_btn.setEnabled(False)
-
-        # Replace the spinbox counter with the "M (n)" label.
-        self.feature_spin.setVisible(False)
-        self._multi_label.setText(f"M ({n})")
-        self._multi_label.setVisible(True)
-
-        self._multi_edit_buttons.setVisible(True)
-        self._show_multi_edit_form(layer)
-
-    def _exit_multi_edit_mode(self):
-        """Exit multi-edit mode and return to normal single-feature navigation.
-
-        Called on Cancel, layer switch, or when selection drops below 2.
-        Does NOT save — changes are discarded unless the user clicked OK first.
-        """
-        if not self._multi_edit_mode:
+    def _sync_with_selection(self):
+        """Follow the map selection: 1 → jump, 2+ → multi-edit, 0 → NA."""
+        layer = self._layer
+        if layer is None:
             return
-        self._multi_edit_mode = False
+        selected = list(layer.selectedFeatureIds())
 
-        # Remove the multi-edit form widget directly, WITHOUT calling form.save(),
-        # so that unsaved multi-edit changes are discarded on cancel/deselect.
-        form = self._feature_form
-        container = self._feature_form_container
-        self._feature_form = None
-        self._feature_form_container = None
-        self._feature_form_layer_id = None
-        widget_to_remove = container if container is not None else form
-        if widget_to_remove is not None:
-            try:
-                self._main_layout.removeWidget(widget_to_remove)
-            except Exception:
-                pass
-            try:
-                widget_to_remove.setParent(None)
-            except Exception:
-                pass
-            try:
-                widget_to_remove.deleteLater()
-            except Exception:
-                pass
-
-        # Restore navigation UI.
-        self._multi_label.setVisible(False)
-        self.feature_spin.setVisible(True)
-        self._multi_edit_buttons.setVisible(False)
-        self._multi_edit_rows = []
-        self._update_edit_buttons()
-
-        # Re-show the single-feature form for the current position.
-        if self.feature_ids and self.current_index >= 0:
-            self._navigate_to_current()
-        else:
-            self._update_display()
-
-    def _show_multi_edit_form(self, layer):
-        """Build and embed a native QgsAttributeForm in MultiEditMode.
-
-        Constructs the form with an *empty* QgsFeature so that no single
-        feature's values are pre-loaded.  QGIS's MultiEditMode then reads
-        ``layer.selectedFeatureIds()`` internally to populate each field
-        widget with the common value (or a mixed-values indicator) and
-        shows the chain-link icon next to each field.  The user clicks a
-        chain icon to mark that field for batch editing, then clicks
-        'Apply to selected'.
-        """
-        self._remove_current_form()
-        self._multi_edit_rows = []
-        self._form_placeholder.setVisible(False)
-        try:
-            # Multi-edit requires an editable layer — the user must start
-            # editing themselves; we never auto-start it here.
-            if not layer.isEditable():
-                self._form_placeholder.setText(
-                    "Enable layer editing to use multi-edit."
-                )
-                self._form_placeholder.setVisible(True)
-                return
-
-            context = QgsAttributeEditorContext()
-            try:
-                vlt = self.iface.vectorLayerTools()
-                if vlt is not None:
-                    context.setVectorLayerTools(vlt)
-            except Exception:
-                pass
-
-            # Empty feature — in MultiEditMode QGIS reads the layer's
-            # selectedFeatureIds() to populate widgets, not this feature.
-            feat = QgsFeature(layer.fields())
-            form = QgsAttributeForm(layer, feat, context, self)
-
-            # Set MultiEditMode.  form.setMode() takes
-            # QgsAttributeEditorContext::Mode, so try that enum first; fall
-            # back through other spellings for version compat, then try the
-            # raw integers (3 for QGIS >= 3.14 which added IdentifyMode at 2,
-            # 2 for older QGIS 3.x builds where IdentifyMode didn't exist).
-            _mode_candidates = []
-            for _src in (QgsAttributeEditorContext,
-                         getattr(QgsAttributeEditorContext, 'Mode', None),
-                         QgsAttributeForm,
-                         getattr(QgsAttributeForm, 'Mode', None)):
-                if _src is None:
-                    continue
-                _v = getattr(_src, 'MultiEditMode', None)
-                if _v is not None and _v not in _mode_candidates:
-                    _mode_candidates.append(_v)
-            _mode_candidates.extend([3, 2])  # integer fallbacks
-            for _m in _mode_candidates:
-                try:
-                    form.setMode(_m)
-                    break
-                except (TypeError, AttributeError):
-                    continue
-
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            try:
-                scroll.setFrameShape(QFrame.NoFrame)
-            except (AttributeError, TypeError):
-                try:
-                    scroll.setFrameShape(QFrame.Shape.NoFrame)
-                except Exception:
-                    pass
-            _AsNeeded = (
-                getattr(Qt, 'ScrollBarAsNeeded', None)
-                or Qt.ScrollBarPolicy.ScrollBarAsNeeded
-            )
-            scroll.setVerticalScrollBarPolicy(_AsNeeded)
-            scroll.setHorizontalScrollBarPolicy(_AsNeeded)
-            from qgis.PyQt.QtWidgets import QSizePolicy
-            _Expanding = (
-                getattr(QSizePolicy, 'Expanding', None)
-                or QSizePolicy.Policy.Expanding
-            )
-            scroll.setSizePolicy(_Expanding, _Expanding)
-            scroll.setMinimumHeight(0)
-            scroll.setWidget(form)
-
-            self._feature_form = form
-            self._feature_form_container = scroll
-            self._feature_form_layer_id = layer.id()
-            insert_pos = self._main_layout.indexOf(self._multi_edit_buttons)
-            if insert_pos >= 0:
-                self._main_layout.insertWidget(insert_pos, scroll, 1)
+        if len(selected) >= 2:
+            if layer.isEditable():
+                self._passive_count = 0
+                self._enter_multi_edit_mode(layer, selected)
             else:
-                self._main_layout.addWidget(scroll, 1)
-            scroll.show()
-            form.show()
-        except Exception as e:
-            self._form_placeholder.setText(f'Cannot display multi-edit form:\n{e}')
-            self._form_placeholder.setVisible(True)
-            self._feature_form = None
-
-    def _on_multi_edit_ok(self):
-        """Apply multi-edit changes to all selected features and exit.
-
-        Ensures the layer is in edit mode (auto-starts if needed), then
-        delegates entirely to ``QgsAttributeForm.save()`` in MultiEditMode.
-        That internally calls ``saveMultiEdit()``, which only writes fields
-        whose chain-link icon was clicked by the user — identical to the
-        native QGIS attribute-table multi-edit behaviour.
-        """
-        layer = self.layer_combo.currentLayer()
-        form = self._feature_form
-        if not isinstance(layer, QgsVectorLayer) or form is None:
-            self._exit_multi_edit_mode()
+                self._leave_multi_edit()
+                self._passive_count = len(selected)
+                self._update_display()
             return
 
-        # saveMultiEdit() returns False immediately if the layer is read-only.
-        if not layer.isEditable():
-            if not layer.startEditing():
-                self.iface.messageBar().pushWarning(
-                    "FeatureNavEd",
-                    "Cannot start editing \u2014 changes not applied."
-                )
+        self._passive_count = 0
+        was_multi = self._multi_edit_mode
+        self._leave_multi_edit()
+
+        if not selected:
+            current = self._current_fid()
+            if current is not None and not feature_exists(layer, current):
+                # Deleted rather than deselected: the list sync moves on.
+                self._pending_deleted.add(current)
+                self._structure_timer.start()
                 return
-
-        try:
-            self._form_saving = True
-            ok = form.save()
-        except Exception:
-            ok = False
-        finally:
-            self._form_saving = False
-
-        if ok:
-            n_f = len(layer.selectedFeatureIds())
-            self.iface.messageBar().pushSuccess(
-                "FeatureNavEd",
-                f"Changes applied to {n_f} feature(s). "
-                "Save Layer Edits to persist."
-            )
-            self._exit_multi_edit_mode()
-        else:
-            self.iface.messageBar().pushWarning(
-                "FeatureNavEd",
-                "Could not apply changes \u2014 the layer may not be editable."
-            )
-
-    def _on_multi_edit_cancel(self):
-        """Discard all multi-edit inputs and return to single-edit mode."""
-        self._exit_multi_edit_mode()
-
-    def _navigate_to_current(self):
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer) or self.current_index < 0:
-            self._update_display()
+            self._enter_na_state()
             return
 
-        fid = self.feature_ids[self.current_index]
-        feat = layer.getFeature(fid)
-
-        if not feat.isValid():
+        target = selected[0]
+        idx = self._index_of(target)
+        if idx < 0:
+            self._flush_structure_changes()
+            idx = self._index_of(target)
+        if idx < 0:
+            self.feature_ids = self._merge_feature_ids()
+            idx = self._index_of(target)
+            if idx < 0:          # e.g. hidden by the layer filter
+                self._enter_na_state()
+                return
+        if idx == self.current_index and not was_multi:
             self._update_display()
             return
+        self.current_index = idx
+        self._navigate_to_current(select=False)
 
-        layer.selectByIds([fid])
-
-        if self.auto_zoom_cb.isChecked() and feat.hasGeometry():
-            self._zoom_to_feature(feat, layer)
-
-        if feat.hasGeometry():
-            if self.enable_flash_cb.isChecked():
-                try:
-                    self.iface.mapCanvas().flashGeometries(
-                        [feat.geometry()], layer.crs()
-                    )
-                except AttributeError:
-                    pass
-
-        self._show_feature_form(layer, feat)
+    def _enter_na_state(self):
+        if self.current_index >= 0:
+            self._accept_current_form()
+            self._last_fid = self._current_fid()
+            self._last_index = self.current_index
+        self.current_index = -1
+        self._clear_highlight()
         self._update_display()
 
-    def _zoom_to_feature(self, feature, layer):
-        canvas = self.iface.mapCanvas()
-        geom = feature.geometry()
+    def _on_lock_navigation_toggled(self, checked):
+        self._lock_navigation = bool(checked)
+        self._save_settings()
+        if self._lock_navigation:
+            if self._multi_edit_mode:
+                self._leave_multi_edit()
+                if self._current_fid() is not None:
+                    self._navigate_to_current(select=False)
+            self._passive_count = 0
+            self._update_highlight()
+        else:
+            self._clear_highlight()
+        self._update_nav_title()
+        self._update_display()
 
-        transform = QgsCoordinateTransform(
-            layer.crs(),
-            canvas.mapSettings().destinationCrs(),
-            QgsProject.instance()
-        )
-
-        center = geom.centroid().asPoint()
-        transformed = transform.transform(center)
-        canvas.setCenter(transformed)
-        if not self.auto_scale_cb.isChecked():
-            canvas.zoomScale(self.scale_spin.value())
-        canvas.refresh()
+    def _update_nav_title(self):
+        if self._lock_navigation:
+            self._nav_group.setTitle("Navigate (locked)")
+            self._nav_group.setToolTip(
+                "Navigation is locked: map clicks and selections don't move the "
+                "navigator.\nUnlock it from the Settings menu.")
+        else:
+            self._nav_group.setTitle("Navigate")
+            self._nav_group.setToolTip("")
 
     # =========================================================================
-    # NATIVE FEATURE FORM
+    # LOCK HIGHLIGHT
+    # =========================================================================
+
+    def _update_highlight(self, feat=None):
+        self._clear_highlight()
+        layer = self._layer
+        fid = self._current_fid()
+        if (not self._lock_navigation or self._multi_edit_mode
+                or layer is None or fid is None):
+            return
+        if feat is None or feat.id() != fid:
+            feat = layer.getFeature(fid)
+        if not feat.isValid() or not feat.hasGeometry():
+            return
+        try:
+            highlight = QgsHighlight(self.iface.mapCanvas(), feat.geometry(), layer)
+            highlight.setColor(_LOCK_HIGHLIGHT_COLOR)
+            fill = QColor(_LOCK_HIGHLIGHT_COLOR)
+            fill.setAlpha(40)
+            highlight.setFillColor(fill)
+            highlight.setWidth(3)
+            highlight.show()
+            self._highlight = highlight
+        except Exception:
+            self._highlight = None
+
+    def _clear_highlight(self):
+        highlight, self._highlight = self._highlight, None
+        if highlight is not None:
+            try:
+                highlight.hide()
+                self.iface.mapCanvas().scene().removeItem(highlight)
+            except Exception:
+                pass
+
+    # =========================================================================
+    # MULTI-EDIT  (2+ features selected on an editable layer)
+    # =========================================================================
+
+    def _enter_multi_edit_mode(self, layer, fids):
+        if not self._multi_edit_mode:
+            self._accept_current_form()
+            self._multi_edit_mode = True
+            self._clear_highlight()
+        self._multi_panel.set_target(layer, fids)
+        self._update_display()
+
+    def _leave_multi_edit(self):
+        """Close the multi-edit panel. Pending values are never applied."""
+        if not self._multi_edit_mode:
+            return
+        pending = self._multi_panel.pending_count()
+        self._multi_edit_mode = False
+        self._multi_panel.reset()
+        if pending:
+            plural = "s" if pending != 1 else ""
+            self._notify(
+                f"Multi-edit closed — {pending} pending field change{plural} "
+                "discarded (nothing was applied).")
+
+    def _on_multi_edit_apply(self):
+        if not self._multi_edit_mode or self._layer is None:
+            return
+        result = self._multi_panel.apply()
+        if result is None:
+            if self._layer is not None and not self._layer.isEditable():
+                self._notify("The layer is not in edit mode.", "warning")
+            return
+        ok, n_fields, n_features = result
+        if ok:
+            plural = "s" if n_fields != 1 else ""
+            self._notify(
+                f"Updated {n_fields} field{plural} on {n_features} features. "
+                "Use Save Edits to keep the changes.", "success")
+        else:
+            self._notify(
+                "Some values could not be applied (check the field constraints). "
+                "Nothing was changed.", "warning")
+
+    # =========================================================================
+    # FIELD ORGANIZER
+    # =========================================================================
+
+    def _refresh_field_organizer(self):
+        layer = self._layer
+        self._field_organizer.set_fields(
+            organizable_fields(layer), self._hidden_fields, self._field_order,
+            designed_form=layer is not None and not uses_generated_layout(layer))
+
+    def _on_organizer_changed(self):
+        layer = self._layer
+        if layer is None:
+            return
+        self._hidden_fields = self._field_organizer.hidden_fields()
+        save_hidden_fields(layer, self._hidden_fields)
+        save_field_order(layer, self._field_organizer.field_order())
+        self._field_order = load_field_order(layer)
+        self._recount_fields()
+        self._apply_field_view()
+
+    def _apply_field_view(self):
+        """Apply field order and hidden fields to the form and multi-edit."""
+        layer = self._layer
+        if layer is not None:
+            if (self._feature_form is not None
+                    and self._feature_form_layer_id == layer.id()):
+                apply_field_order(self._feature_form, layer, self._field_order)
+                apply_to_attribute_form(self._feature_form, layer, self._hidden_fields)
+            self._multi_panel.set_field_order(self._field_order)
+            self._multi_panel.set_hidden_fields(self._hidden_fields)
+        self._update_fields_indicator()
+
+    def _recount_fields(self):
+        names = [name for name, _, _ in organizable_fields(self._layer)]
+        hidden = sum(1 for name in names if name in self._hidden_fields)
+        self._field_counts = (len(names) - hidden, len(names))
+
+    def _update_fields_indicator(self, *args):
+        shown, total = self._field_counts
+        hidden = total - shown
+        self.fields_btn.setEnabled(self._layer is not None)
+        self.fields_btn.blockSignals(True)
+        self.fields_btn.setChecked(hidden > 0)
+        self.fields_btn.blockSignals(False)
+        if hidden:
+            self.fields_btn.setToolTip(
+                f"Choose which fields to show ({hidden} of {total} hidden)")
+        else:
+            self.fields_btn.setToolTip("Choose which fields to show")
+        show_hint = hidden > 0 and self._content_mode in ('form', 'multi')
+        if show_hint:
+            self._fields_hint.setText(
+                grey(f"Showing {shown} of {total} fields") +
+                " · <a href='organize'>Change</a>")
+        self._fields_hint.setVisible(show_hint)
+
+    def _show_help(self, *args):
+        from .help_dialog import HelpDialog
+        if self._help_dialog is None:
+            self._help_dialog = HelpDialog(self.iface.mainWindow())
+        self._help_dialog.show()
+        self._help_dialog.raise_()
+        self._help_dialog.activateWindow()
+
+    def _on_fields_hint_link(self, link):
+        if link == 'organize':
+            self.fields_btn.showMenu()
+
+    # =========================================================================
+    # EDITING TOOLBAR
+    # =========================================================================
+
+    def _original_feature(self, layer, fid):
+        """The feature as last saved (straight from the data provider)."""
+        request = QgsFeatureRequest().setFilterFid(fid)
+        for feat in layer.dataProvider().getFeatures(request):
+            return feat if feat.isValid() else None
+        return None
+
+    def _current_unsaved_state(self):
+        """'added', 'changed' or None for the current feature.
+
+        QGIS keeps a feature flagged as changed even after a value is set
+        back to what was saved, so changes are compared with the saved
+        feature instead of trusting the flag.
+        """
+        layer = self._layer
+        fid = self._current_fid()
+        if (layer is None or fid is None or self._multi_edit_mode
+                or not layer.isEditable()):
+            return None
+        buffer = layer.editBuffer()
+        if buffer is None:
+            return None
+        try:
+            if buffer.isFeatureAdded(fid):
+                return 'added'
+            attributes_changed = buffer.isFeatureAttributesChanged(fid)
+            geometry_changed = buffer.isFeatureGeometryChanged(fid)
+        except Exception:
+            return None
+        if self._form_dirty:
+            return 'changed'
+        if not (attributes_changed or geometry_changed):
+            return None
+        original = self._original_feature(layer, fid)
+        if original is None:
+            return 'changed'
+        current = layer.getFeature(fid)
+        fields = layer.fields()
+        if attributes_changed:
+            for idx in buffer.changedAttributeValues().get(fid, {}):
+                source = fields.fieldOriginIndex(idx)
+                if (0 <= source < len(original.attributes()) and not values_equal(
+                        current.attribute(idx), original.attribute(source))):
+                    return 'changed'
+        if geometry_changed and not _same_geometry(current, original):
+            return 'changed'
+        return None
+
+    def _revert_current_feature(self):
+        """Discard unsaved changes to the current feature only (one undo step).
+        A feature added in this editing session is removed, just like
+        discarding all unsaved edits would."""
+        layer = self._layer
+        fid = self._current_fid()
+        state = self._current_unsaved_state()
+        if state is None:
+            return
+        if state == 'added':
+            text = (f"Feature {fid} was added in this editing session.\n\n"
+                    "Reverting removes it, as discarding unsaved edits would.")
+        else:
+            text = f"Discard the unsaved changes to feature {fid}?"
+        reply = QMessageBox.question(self, "Revert Feature", text + "\n\nYou can Undo this.",
+                                     MB_YES | MB_NO, MB_NO)
+        if reply != MB_YES:
+            return
+        self._set_form_dirty(False)
+        if state == 'added':
+            layer.beginEditCommand(f"FeatureNavEd: revert feature {fid}")
+            if layer.deleteFeature(fid):
+                layer.endEditCommand()
+                layer.triggerRepaint()
+                self._pending_deleted.add(fid)
+                self._flush_structure_changes()
+            else:
+                layer.destroyEditCommand()
+                self._notify(f"Could not revert feature {fid}.", "warning")
+            return
+
+        buffer = layer.editBuffer()
+        original = self._original_feature(layer, fid)
+        current = layer.getFeature(fid)
+        fields = layer.fields()
+        attribute_changes = {}
+        if original is not None:
+            for idx in buffer.changedAttributeValues().get(fid, {}):
+                source = fields.fieldOriginIndex(idx)
+                if 0 <= source < len(original.attributes()):
+                    value = original.attribute(source)
+                    if not values_equal(current.attribute(idx), value):
+                        attribute_changes[idx] = value
+        geometry = None
+        if (original is not None and buffer.isFeatureGeometryChanged(fid)
+                and not _same_geometry(current, original)):
+            geometry = original.geometry()
+        if attribute_changes or geometry is not None:
+            layer.beginEditCommand(f"FeatureNavEd: revert feature {fid}")
+            ok = True
+            for idx, value in attribute_changes.items():
+                ok = layer.changeAttributeValue(fid, idx, value) and ok
+            if geometry is not None:
+                ok = layer.changeGeometry(fid, geometry) and ok
+            if ok:
+                layer.endEditCommand()
+            else:
+                layer.destroyEditCommand()
+                self._notify(f"Could not revert feature {fid}.", "warning")
+            layer.triggerRepaint()
+        # Show the saved values (this also drops anything typed but unsaved).
+        feat = layer.getFeature(fid)
+        if self._feature_form is not None and feat.isValid():
+            self._form_saving = True
+            try:
+                self._feature_form.setFeature(feat)
+            finally:
+                self._form_saving = False
+            self._set_form_dirty(False)
+            if self._hidden_fields:
+                apply_to_attribute_form(self._feature_form, layer, self._hidden_fields)
+        self._update_highlight(feat)
+        self._update_measurements(feat)
+        self._update_display()
+
+    # --- review tracking ----------------------------------------------------
+
+    def _go_next_unvisited(self):
+        self._flush_structure_changes()
+        if self._multi_edit_mode or not self.feature_ids:
+            return
+        total = len(self.feature_ids)
+        start = self.current_index if self.current_index >= 0 else self._anchor_index()
+        for offset in range(1, total + 1):
+            idx = (start + offset) % total
+            if self.feature_ids[idx] not in self._visited:
+                self._go_to_index(idx)
+                return
+        self._notify(f"All {total} features have been visited.", "success")
+
+    def _clear_visited(self, *args):
+        layer = self._layer
+        if layer is None:
+            return
+        reply = QMessageBox.question(
+            self, "Clear Visited Marks",
+            f"Forget which features of \"{layer.name()}\" you have visited?",
+            MB_YES | MB_NO, MB_NO)
+        if reply != MB_YES:
+            return
+        self._visited.clear()
+        self._seen_before = False
+        self._update_display()
+
+    def _on_track_visited_toggled(self, checked):
+        self._save_settings()
+        if checked and self._current_fid() is not None:
+            self._visited.mark(self._current_fid())
+        self._update_display()
+
+    def _update_review(self):
+        tracking = self.track_visited_cb.isChecked() and self._layer is not None
+        self.review_strip.setVisible(tracking)
+        self._review_row.setVisible(tracking)
+        if not tracking:
+            self.seen_dot.setVisible(False)
+            return
+        visited = self._visited.ids
+        flags = [fid in visited for fid in self.feature_ids]
+        current = self.current_index if self.current_index >= 0 else self._anchor_index()
+        self.review_strip.set_state(flags, current)
+        done = sum(flags)
+        self.visited_label.setText(f"Visited {done} / {len(flags)}")
+        self.next_unvisited_btn.setEnabled(
+            not self._multi_edit_mode and 0 < len(flags) and done < len(flags))
+        show_dot = (self._current_fid() is not None and not self._multi_edit_mode
+                    and self._passive_count < 2)
+        self.seen_dot.setVisible(show_dot)
+        if show_dot:
+            color = "#2ea043" if self._seen_before else "gray"
+            self.seen_dot.setStyleSheet(f"color: {color};")
+            self.seen_dot.setToolTip("Seen before" if self._seen_before else "First visit")
+
+    # --- measurements -------------------------------------------------------
+
+    def _update_measurements(self, feat=None):
+        layer = self._layer
+        fid = self._current_fid()
+        text = ""
+        if (self.show_measurements_cb.isChecked() and layer is not None
+                and fid is not None and not self._multi_edit_mode):
+            if feat is None or not feat.isValid() or feat.id() != fid:
+                feat = layer.getFeature(fid)
+            if feat.isValid() and feat.hasGeometry():
+                try:
+                    text = describe_geometry(layer, feat.geometry())
+                except Exception:
+                    text = ""
+        self._measure_text = text
+
+    def _on_show_measurements_toggled(self, *args):
+        self._save_settings()
+        self._update_measurements()
+        self._update_content()
+
+    def _layer_tools(self):
+        try:
+            return self.iface.vectorLayerTools()
+        except Exception:
+            return None
+
+    def _toggle_editing(self, *args):
+        layer = self._layer
+        if layer is None:
+            self._update_toolbar_state()
+            return
+        tools = self._layer_tools()
+        if not layer.isEditable():
+            if tools is not None:
+                tools.startEditing(layer)
+            else:
+                layer.startEditing()
+        else:
+            self._accept_current_form()
+            if tools is not None:
+                tools.stopEditing(layer, True)   # asks Save / Discard / Cancel
+            elif layer.isModified():
+                layer.commitChanges()
+            else:
+                layer.rollBack()
+        self._update_toolbar_state()
+
+    def _save_edits(self):
+        layer = self._layer
+        if layer is None or not layer.isEditable():
+            return
+        self._accept_current_form()
+        tools = self._layer_tools()
+        if tools is not None:
+            tools.saveEdits(layer)
+        else:
+            try:
+                layer.commitChanges(False)
+            except TypeError:
+                layer.commitChanges()
+                layer.startEditing()
+        layer.triggerRepaint()
+        self._update_toolbar_state()
+
+    def _undo(self):
+        layer = self._layer
+        if layer is None or not layer.isEditable():
+            return
+        self._accept_current_form()   # so a just-typed value is what gets undone
+        if layer.undoStack().canUndo():
+            layer.undoStack().undo()
+        layer.triggerRepaint()
+
+    def _redo(self):
+        layer = self._layer
+        if layer is None or not layer.isEditable():
+            return
+        layer.undoStack().redo()
+        layer.triggerRepaint()
+
+    def _on_editing_state_changed(self, *args):
+        self._update_toolbar_state()
+        layer = self._layer
+        if layer is None:
+            return
+        if not self._lock_navigation and (
+                self._multi_edit_mode or layer.selectedFeatureCount() >= 2):
+            self._sync_with_selection()
+        else:
+            self._update_display()
+
+    def _on_before_commit(self, *args):
+        # Make sure values still sitting in the form widgets are part of the
+        # save (also when the user saves from the main QGIS toolbar).
+        self._accept_current_form()
+
+    def _update_toolbar_state(self, *args):
+        layer = self._layer
+        valid = layer is not None
+        editable = valid and layer.isEditable()
+        try:
+            can_edit = valid and layer.supportsEditing()
+        except Exception:
+            can_edit = valid
+        self.toggle_edit_btn.setEnabled(can_edit)
+        self.toggle_edit_btn.blockSignals(True)
+        self.toggle_edit_btn.setChecked(editable)
+        self.toggle_edit_btn.blockSignals(False)
+        self.save_edits_btn.setEnabled(editable)
+        can_undo = can_redo = False
+        if editable:
+            try:
+                stack = layer.undoStack()
+                can_undo, can_redo = stack.canUndo(), stack.canRedo()
+                can_undo = can_undo or self._form_dirty
+            except Exception:
+                pass
+        self.undo_btn.setEnabled(can_undo)
+        self.redo_btn.setEnabled(can_redo)
+
+        self.query_builder_btn.setEnabled(valid)
+        self.query_builder_btn.blockSignals(True)
+        self.query_builder_btn.setChecked(valid and bool(layer.subsetString()))
+        self.query_builder_btn.blockSignals(False)
+        self.search_btn.setEnabled(valid)
+
+        has_feature = self._current_fid() is not None and not self._multi_edit_mode
+        self.flash_btn.setEnabled(has_feature)
+        self.del_btn.setEnabled(editable and has_feature)
+        self.revert_btn.setEnabled(self._current_unsaved_state() is not None)
+
+    # =========================================================================
+    # QUERY BUILDER
+    # =========================================================================
+
+    def _toggle_query_builder(self, *args):
+        """Checked = the layer has a filter. Click to set it, click again to clear."""
+        layer = self._layer
+        if layer is None:
+            self._update_toolbar_state()
+            return
+        if layer.isEditable():
+            self._notify("Stop editing the layer before changing its filter.", "warning")
+            self._update_toolbar_state()
+            return
+        if layer.subsetString():
+            layer.setSubsetString('')
+        else:
+            try:
+                from qgis.gui import QgsQueryBuilder
+            except ImportError:
+                self._notify("QgsQueryBuilder is not available in this QGIS version.",
+                             "warning")
+                self._update_toolbar_state()
+                return
+            dlg = QgsQueryBuilder(layer, self.iface.mainWindow())
+            dlg.setSql(layer.subsetString())
+            (getattr(dlg, 'exec', None) or dlg.exec_)()
+        self._update_toolbar_state()
+
+    # =========================================================================
+    # FIND
+    # =========================================================================
+
+    def _on_search_toggled(self, checked):
+        self._find_bar.setVisible(checked)
+        if checked:
+            self._find_bar.focus_input()
+
+    def _find_match(self, forward=True):
+        layer = self._layer
+        if layer is None:
+            return
+        self._flush_structure_changes()
+        if self._multi_edit_mode or not self.feature_ids:
+            return
+        matches = self._find_bar.matching_ids(layer)
+        if matches is None:
+            return
+        if not matches:
+            field_name, text = self._find_bar.query()
+            self._notify(f'No feature where {field_name} = "{text}".')
+            return
+        total = len(self.feature_ids)
+        start = self.current_index
+        if start < 0:
+            start = -1 if forward else 0
+        step = 1 if forward else -1
+        for offset in range(1, total + 1):
+            idx = (start + offset * step) % total
+            if self.feature_ids[idx] in matches:
+                self._go_to_index(idx)
+                return
+
+    # =========================================================================
+    # DELETE
+    # =========================================================================
+
+    def _delete_current_feature(self):
+        layer = self._layer
+        fid = self._current_fid()
+        if layer is None or fid is None or not layer.isEditable():
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Feature",
+            f"Delete feature {fid} from \"{layer.name()}\"?\n\n"
+            "The change goes into the layer's edit buffer — Save Edits to "
+            "keep it, or Undo to bring the feature back.",
+            MB_YES | MB_NO,
+            MB_NO,
+        )
+        if reply != MB_YES:
+            return
+        layer.beginEditCommand(f"FeatureNavEd: delete feature {fid}")
+        if layer.deleteFeature(fid):
+            layer.endEditCommand()
+            layer.triggerRepaint()
+            # Same path as a Del-key / attribute-table delete: the layer's
+            # featuresDeleted signal moves the navigator on.
+            self._pending_deleted.add(fid)
+            self._flush_structure_changes()
+        else:
+            layer.destroyEditCommand()
+            self._notify(f"Failed to delete feature {fid}.", "warning")
+
+    # =========================================================================
+    # NATIVE FEATURE FORM (single feature)
     # =========================================================================
 
     def _accept_current_form(self):
-        """Push any pending widget values into the current form's feature.
+        """Push values still in the form widgets into the layer's edit buffer.
 
-        This does NOT commit edits to disk — it only pulls the values out of
-        the form's widgets into the form's working ``QgsFeature``. The layer
-        still needs its standard "Save Edits" action to persist changes.
-        Calling this before swapping features prevents edits made on the
-        current feature from being silently discarded when we navigate away.
+        Nothing is committed to disk; the layer still needs Save Edits.
         """
         form = self._feature_form
-        if form is None:
+        layer = self._layer
+        if form is None or layer is None or self._form_saving:
             return
-        # In SingleEditMode, save() applies widget values to the edit buffer
-        # via QgsVectorLayer.changeAttributeValue(), but the layer's edit
-        # buffer is only persisted on the user's explicit "Save Edits".
+        if not layer.isEditable():
+            return
         try:
-            self._form_saving = True
+            fid = form.feature().id()
+        except Exception:
+            return
+        if fid in self._pending_deleted or not feature_exists(layer, fid):
+            return   # never write into a feature that was just deleted
+        self._form_saving = True
+        try:
             form.save()
         except Exception:
             pass
         finally:
             self._form_saving = False
+        self._set_form_dirty(False)
+
+    def _on_form_widget_changed(self, *args):
+        if not self._form_saving:
+            self._set_form_dirty(True)
+
+    def _set_form_dirty(self, dirty):
+        if dirty != self._form_dirty:
+            self._form_dirty = dirty
+            self._update_toolbar_state()
 
     def _remove_current_form(self):
-        """Remove the current feature form widget from the layout.
-
-        Pushes pending widget values into the edit buffer first (so edits made
-        on the current feature are not silently dropped when the form is
-        swapped out), and is defensive against the underlying C++ layer having
-        already been destroyed.
-        """
-        form = self._feature_form
-        container = self._feature_form_container
-        # Clear the attributes first so any re-entrancy is safe.
+        """Drop the cached form widget (does not save)."""
+        container = self._feature_form_container or self._feature_form
         self._feature_form = None
         self._feature_form_container = None
         self._feature_form_layer_id = None
-        if form is not None:
-            try:
-                self._form_saving = True
-                form.save()
-            except Exception:
-                pass
-            finally:
-                self._form_saving = False
-        widget_to_remove = container if container is not None else form
-        if widget_to_remove is None:
+        if container is None:
             return
         try:
-            self._main_layout.removeWidget(widget_to_remove)
-        except Exception:
-            pass
-        try:
-            widget_to_remove.close()
-        except Exception:
-            pass
-        try:
-            widget_to_remove.setParent(None)
-        except Exception:
-            pass
-        try:
-            widget_to_remove.deleteLater()
+            self._main_layout.removeWidget(container)
+            container.hide()
+            container.setParent(None)
+            container.deleteLater()
         except Exception:
             pass
 
-    def _show_feature_form(self, layer, feature):
-        """Show an embedded QgsAttributeForm for the given feature.
+    def _show_feature_form(self, layer, feature, save_pending=True):
+        """Show ``feature`` in the embedded native attribute form.
 
-        Uses ``QgsAttributeForm`` directly (rather than
-        ``iface.getFeatureForm()`` which returns a ``QgsAttributeDialog``
-        wrapper) so that:
-          * the form embeds cleanly in the dock layout with no OK/Cancel bar
-          * it operates in ``SingleEditMode`` — widget changes flow into the
-            layer's edit buffer when the field loses focus / save() is called,
-            but are NOT auto-committed to disk
-          * the user persists edits via the layer's standard "Save Edits"
-            action, exactly like the native attribute form
-
-        For repeat visits to features within the same layer, the form widget
-        is reused via ``setFeature()`` instead of being rebuilt from scratch,
-        which is dramatically faster for wide forms.
+        The form widget is reused for every feature of the same layer
+        (``setFeature``), which is much faster than rebuilding wide forms.
         """
-        # Cache hit: reuse the existing form for this layer.
-        if (self._feature_form is not None
-                and self._feature_form_layer_id == layer.id()):
-            try:
-                self._form_saving = True
-                self._feature_form.save()  # commit any in-progress edits first
-            except Exception:
-                pass
-            finally:
-                self._form_saving = False
+        self._form_error = None
+        if self._feature_form is not None and self._feature_form_layer_id == layer.id():
+            if save_pending:
+                self._accept_current_form()
+            reused = False
+            self._form_saving = True
             try:
                 self._feature_form.setFeature(feature)
-                self._form_placeholder.setVisible(False)
-                return
+                reused = True
+                self._set_form_dirty(False)
             except Exception:
-                # Fall through to a full rebuild on any unexpected failure.
-                pass
+                pass   # fall through to a full rebuild
+            finally:
+                self._form_saving = False
+            if reused:
+                if self._hidden_fields:
+                    apply_to_attribute_form(self._feature_form, layer, self._hidden_fields)
+                return
 
+        if save_pending:
+            self._accept_current_form()
         self._remove_current_form()
-        self._form_placeholder.setVisible(False)
-
         try:
             context = QgsAttributeEditorContext()
+            tools = self._layer_tools()
+            if tools is not None:
+                context.setVectorLayerTools(tools)
+            form = QgsAttributeForm(layer, feature, context, self)
             try:
-                vlt = self.iface.vectorLayerTools()
-                if vlt is not None:
-                    context.setVectorLayerTools(vlt)
+                form.widgetValueChanged.connect(self._on_form_widget_changed)
             except Exception:
                 pass
-
-            form = QgsAttributeForm(layer, feature, context, self)
-            # SingleEditMode = 0 in QgsAttributeForm.Mode. Different QGIS / sip
-            # builds expose the enum value differently and some reject the
-            # scoped enum on this overload, so try several spellings and fall
-            # back to the integer.
-            _mode_candidates = []
-            try:
-                _mode_candidates.append(QgsAttributeForm.SingleEditMode)
-            except AttributeError:
-                pass
-            try:
-                _mode_candidates.append(QgsAttributeForm.Mode.SingleEditMode)
-            except AttributeError:
-                pass
-            _mode_candidates.append(0)  # integer fallback
-            for _m in _mode_candidates:
+            self._set_form_dirty(False)
+            mode = form_mode('SingleEditMode')
+            if mode is not None:
                 try:
-                    form.setMode(_m)
-                    break
+                    form.setMode(mode)
                 except (TypeError, AttributeError):
-                    continue
-
-            # Wrap the form in a QScrollArea so layers with many fields can
-            # scroll instead of being clipped by the dock's available height.
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            try:
-                scroll.setFrameShape(QFrame.NoFrame)
-            except (AttributeError, TypeError):
-                try:
-                    scroll.setFrameShape(QFrame.Shape.NoFrame)
-                except Exception:
                     pass
-            # Force scrollbars to appear when the form is taller than the
-            # available viewport. Without explicit policies some styles end
-            # up never drawing the vertical scrollbar, so the bottom fields
-            # get clipped.
-            _AsNeeded = (
-                getattr(Qt, 'ScrollBarAsNeeded', None)
-                or Qt.ScrollBarPolicy.ScrollBarAsNeeded
-            )
-            scroll.setVerticalScrollBarPolicy(_AsNeeded)
-            scroll.setHorizontalScrollBarPolicy(_AsNeeded)
-            # Allow the scroll area to shrink below the form's preferred
-            # height (otherwise its sizeHint forces the dock to grow to fit
-            # all fields and the bottom of the form falls off the screen).
-            from qgis.PyQt.QtWidgets import QSizePolicy
-            _Expanding = (
-                getattr(QSizePolicy, 'Expanding', None)
-                or QSizePolicy.Policy.Expanding
-            )
-            scroll.setSizePolicy(_Expanding, _Expanding)
-            scroll.setMinimumHeight(0)
-            scroll.setWidget(form)
-
+            if self._field_order:
+                apply_field_order(form, layer, self._field_order)
+            if self._hidden_fields:
+                apply_to_attribute_form(form, layer, self._hidden_fields)
+            scroll = make_scroll_area(form, SCROLL_AS_NEEDED)
             self._feature_form = form
             self._feature_form_container = scroll
             self._feature_form_layer_id = layer.id()
-            # Insert before the multi-edit button bar so it always sits below the form.
-            insert_pos = self._main_layout.indexOf(self._multi_edit_buttons)
-            if insert_pos >= 0:
-                self._main_layout.insertWidget(insert_pos, scroll, 1)
-            else:
-                self._main_layout.addWidget(scroll, 1)
-            scroll.show()
-            form.show()
+            insert_pos = self._main_layout.indexOf(self._multi_panel)
+            self._main_layout.insertWidget(max(insert_pos, 0), scroll, 1)
         except Exception as e:
-            self._form_placeholder.setText(f"Cannot display feature form:\n{e}")
-            self._form_placeholder.setVisible(True)
             self._feature_form = None
+            self._feature_form_container = None
+            self._feature_form_layer_id = None
+            self._form_error = f"Cannot display feature form:\n{e}"
 
     # =========================================================================
     # DISPLAY STATE
     # =========================================================================
 
     def _update_display(self):
-        # Don't modify navigation UI while multi-edit mode is active.
-        if self._multi_edit_mode:
-            return
         total = len(self.feature_ids)
+        idx = self.current_index
+        multi = self._multi_edit_mode
+        passive = not multi and self._passive_count >= 2
 
         self.feature_spin.blockSignals(True)
-        if total == 0:
-            # No features at all (empty layer, or Selected-only with nothing selected).
-            self._multi_label.setVisible(False)
-            self.feature_spin.setVisible(True)
-            self.feature_spin.setRange(0, 0)
-            self.feature_spin.setValue(0)
-            self.feature_total_label.setText("/ 0")
-            self.first_btn.setEnabled(False)
-            self.prev_btn.setEnabled(False)
-            self.next_btn.setEnabled(False)
-            self.last_btn.setEnabled(False)
-            self.flash_btn.setEnabled(False)
-            self._remove_current_form()
-            self._form_placeholder.setText("No feature selected")
-            self._form_placeholder.setVisible(True)
-            self.feature_spin.blockSignals(False)
-            self._update_sort_value()
-            return
-
-        if self.current_index < 0:
-            # NA state: features exist on the layer but none is active.
-            # Show 'NA / <total>' with all nav buttons enabled so the user can
-            # press First/Next/Last/Prev to start browsing.
-            self.feature_spin.setRange(0, 0)
-            self.feature_spin.setValue(0)
-            self.feature_spin.setVisible(False)
-            self._multi_label.setText("NA")
-            self._multi_label.setVisible(True)
+        try:
+            if multi or passive:
+                n = len(self._multi_panel.fids) if multi else self._passive_count
+                self._show_counter_text(
+                    f"M ({n})",
+                    "Multi-edit: several features are selected" if multi else
+                    f"{n} features selected — start editing to multi-edit them")
+            elif total and idx < 0:
+                self._show_counter_text("NA", "No feature is active")
+            else:
+                self._counter_label.setVisible(False)
+                self.feature_spin.setVisible(True)
+                if total:
+                    self.feature_spin.setRange(1, total)
+                    self.feature_spin.setValue(idx + 1)
+                else:
+                    self.feature_spin.setRange(0, 0)
+                    self.feature_spin.setValue(0)
             self.feature_total_label.setText(f"/ {total}")
-            self.first_btn.setEnabled(True)
-            self.prev_btn.setEnabled(True)
-            self.next_btn.setEnabled(True)
-            self.last_btn.setEnabled(True)
-            self._remove_current_form()
-            self._form_placeholder.setText("")
-            self._form_placeholder.setVisible(True)
+        finally:
             self.feature_spin.blockSignals(False)
-            self._update_sort_value()
-            self._update_edit_buttons()
-            return
 
-        # Normal single-feature navigation.
-        self._multi_label.setVisible(False)
-        self.feature_spin.setVisible(True)
-        self.feature_spin.setRange(1, total)
-        self.feature_spin.setValue(self.current_index + 1)
-        self.feature_total_label.setText(f"/ {total}")
-        self.feature_spin.blockSignals(False)
-        self.first_btn.setEnabled(self.current_index > 0)
-        self.prev_btn.setEnabled(self.current_index > 0)
-        self.next_btn.setEnabled(self.current_index < total - 1)
-        self.last_btn.setEnabled(self.current_index < total - 1)
+        can_nav = total > 0 and not multi
+        in_na = idx < 0
+        self.first_btn.setEnabled(can_nav and (in_na or idx > 0))
+        self.prev_btn.setEnabled(can_nav and (in_na or idx > 0))
+        self.next_btn.setEnabled(can_nav and (in_na or idx < total - 1))
+        self.last_btn.setEnabled(can_nav and (in_na or idx < total - 1))
+        self.feature_spin.setEnabled(can_nav)
+
+        self._update_content()
+        self._update_review()
         self._update_sort_value()
-        self._update_edit_buttons()
+        self._update_toolbar_state()
+
+    def _show_counter_text(self, text, tooltip):
+        self.feature_spin.setVisible(False)
+        self._counter_label.setText(text)
+        self._counter_label.setToolTip(tooltip)
+        self._counter_label.setVisible(True)
+
+    def _update_content(self):
+        """Show exactly one of: multi-edit panel, feature form, placeholder."""
+        if self._multi_edit_mode:
+            mode = 'multi'
+        elif (self._current_fid() is not None and self._feature_form is not None
+              and self._form_error is None):
+            mode = 'form'
+        else:
+            mode = 'placeholder'
+            self._form_placeholder.setText(self._placeholder_text())
+        self._content_mode = mode
+        self._multi_panel.setVisible(mode == 'multi')
+        if self._feature_form_container is not None:
+            self._feature_form_container.setVisible(mode == 'form')
+        self._form_placeholder.setVisible(mode == 'placeholder')
+        self._measure_label.setText(self._measure_text)
+        self._measure_label.setVisible(mode == 'form' and bool(self._measure_text))
+        self._update_fields_indicator()
+
+    def _placeholder_text(self):
+        if self._form_error:
+            return html.escape(self._form_error).replace("\n", "<br>")
+        layer = self._layer
+        if layer is None:
+            return grey("Choose a layer above, or drag one here from the Layers panel.")
+        if not self.feature_ids:
+            if layer.subsetString():
+                return grey("No features match the layer filter.")
+            return grey("This layer has no features.")
+        anchor = self._anchor_index()
+        if anchor >= 0:
+            return (grey("No feature selected.") + "<br><br>"
+                    f"<a href='resume'>Return to feature {anchor + 1}</a>")
+        if self._lock_navigation:
+            return grey("No feature selected.<br>Use the arrows or Find to start.")
+        return grey("No feature selected.<br>"
+                    "Use the arrows, or select a feature on the map.")
 
     def _update_sort_value(self):
-        """Update the sort group title with the current feature's sort field value."""
         sort_field = self.sort_field_combo.currentData()
-        layer = self.layer_combo.currentLayer()
-        if not sort_field or not isinstance(layer, QgsVectorLayer) or self.current_index < 0:
-            self._sort_group.setTitle("Sort By")
-            return
-        fid = self.feature_ids[self.current_index]
-        feat = layer.getFeature(fid)
-        if not feat.isValid():
-            self._sort_group.setTitle("Sort By")
-            return
-        val = feat[sort_field]
-        if val is None or val == NULL:
-            self._sort_group.setTitle(f"Sort By \u2014 {sort_field}: NULL")
-        else:
-            self._sort_group.setTitle(f"Sort By \u2014 {sort_field}: {val}")
+        layer = self._layer
+        fid = self._current_fid()
+        title = "Sort By"
+        if sort_field and layer is not None and fid is not None and not self._multi_edit_mode:
+            request = QgsFeatureRequest().setFilterFid(fid)
+            request.setSubsetOfAttributes([sort_field], layer.fields())
+            request.setFlags(NO_GEOMETRY)
+            for feat in layer.getFeatures(request):
+                value = feat[sort_field]
+                shown = "NULL" if is_null(value) else value
+                title = f"Sort By — {sort_field}: {shown}"
+        self._sort_group.setTitle(title)
 
-    def _open_attribute_table(self):
-        """Open the attribute table for the current layer."""
-        layer = self.layer_combo.currentLayer()
-        if isinstance(layer, QgsVectorLayer):
-            self.iface.showAttributeTable(layer)
-
-    def _toggle_query_builder(self):
-        """On/off Query Builder filter.
-
-        Button OFF -> ON : open Query Builder dialog; if user clicks OK the
-                           filter is applied and the button stays checked.
-        Button ON  -> OFF: clear the filter immediately, no dialog.
-        """
-        layer = self.layer_combo.currentLayer()
-        if not isinstance(layer, QgsVectorLayer):
-            self.query_builder_btn.setChecked(False)
-            return
-
-        # Button was turned OFF -> clear the filter
-        if not self.query_builder_btn.isChecked():
-            layer.setSubsetString('')
-            self._reload_features()
-            return
-
-        # Button was turned ON -> open dialog so user can set a filter
+    def _notify(self, text, level="info", duration=4):
+        name = {'info': 'Info', 'success': 'Success', 'warning': 'Warning'}[level]
         try:
-            from qgis.gui import QgsQueryBuilder
-        except ImportError:
-            self.iface.messageBar().pushWarning(
-                "FeatureNavEd",
-                "QgsQueryBuilder is not available in this QGIS version."
-            )
-            self.query_builder_btn.setChecked(False)
-            return
-
-        dlg = QgsQueryBuilder(layer, self.iface.mainWindow())
-        dlg.setSql(layer.subsetString())
-        if dlg.exec():
-            # Filter applied successfully — keep button checked, refresh list
-            self._reload_features()
-        else:
-            # User cancelled — revert button to unchecked
-            self.query_builder_btn.setChecked(False)
-
-    # =========================================================================
-    # LOCK SELECTION  (filter from active selection)
-    # =========================================================================
-
-    def _on_lock_selection_toggled(self, checked):
-        layer = self.layer_combo.currentLayer()
-        if checked:
-            if not isinstance(layer, QgsVectorLayer):
-                self.lock_selection_btn.blockSignals(True)
-                self.lock_selection_btn.setChecked(False)
-                self.lock_selection_btn.blockSignals(False)
-                return
-            ids = list(layer.selectedFeatureIds())
-            if not ids:
-                self.iface.messageBar().pushInfo(
-                    "FeatureNavEd",
-                    "No features selected on the active layer."
-                )
-                self.lock_selection_btn.blockSignals(True)
-                self.lock_selection_btn.setChecked(False)
-                self.lock_selection_btn.blockSignals(False)
-                return
-            self._locked_selection_ids = set(ids)
-            self.selected_only_cb.blockSignals(True)
-            self.selected_only_cb.setChecked(True)
-            self.selected_only_cb.blockSignals(False)
-            self.lock_selection_btn.setIcon(
-                QgsApplication.getThemeIcon('/locked.svg')
-            )
-            self.lock_selection_btn.setToolTip(
-                f"Locked {len(ids)} feature(s). Click to unlock."
-            )
-        else:
-            self._locked_selection_ids = None
-            self.lock_selection_btn.setIcon(
-                QgsApplication.getThemeIcon('/lockedGray.svg')
-            )
-            self.lock_selection_btn.setToolTip(
-                "Lock the current selection as a fixed navigation set"
-            )
-        self._reload_features()
-
-    # =========================================================================
-    # DUPLICATE / DELETE
-    # =========================================================================
-
-    def _update_edit_buttons(self, *_args):
-        layer = self.layer_combo.currentLayer()
-        editable = isinstance(layer, QgsVectorLayer) and layer.isEditable()
-        has_feature = self.current_index >= 0 and bool(self.feature_ids)
-        self.flash_btn.setEnabled(has_feature)
-        self.del_btn.setEnabled(editable and has_feature)
-
-    def _delete_current_feature(self):
-        layer = self.layer_combo.currentLayer()
-        if (not isinstance(layer, QgsVectorLayer)
-                or not layer.isEditable()
-                or self.current_index < 0):
-            return
-        fid = self.feature_ids[self.current_index]
-        reply = QMessageBox.question(
-            self,
-            "Delete Feature",
-            f"Delete feature {fid} from \"{layer.name()}\"?\n\n"
-            "The change goes into the layer's edit buffer \u2014 click 'Save Layer Edits' "
-            "to persist, or 'Rollback' to undo.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        if not layer.deleteFeature(fid):
-            self.iface.messageBar().pushWarning(
-                "FeatureNavEd", f"Failed to delete feature {fid}."
-            )
-            return
-        prev_index = self.current_index
-        self._reload_features()
-        if self.feature_ids:
-            self.current_index = min(prev_index, len(self.feature_ids) - 1)
-            self._navigate_to_current()
+            self.iface.messageBar().pushMessage(
+                "FeatureNavEd", text, message_level(name), duration)
+        except Exception:
+            pass
 
     # =========================================================================
     # SETTINGS PERSISTENCE
     # =========================================================================
 
-    _SETTINGS_PREFIX = "featurenaved"
-
-    def _save_settings(self):
+    def _save_settings(self, *args):
         try:
             s = QgsSettings()
-            s.setValue(f"{self._SETTINGS_PREFIX}/auto_zoom",
-                       bool(self.auto_zoom_cb.isChecked()))
-            s.setValue(f"{self._SETTINGS_PREFIX}/auto_scale",
-                       bool(self.auto_scale_cb.isChecked()))
-            s.setValue(f"{self._SETTINGS_PREFIX}/enable_flash",
-                       bool(self.enable_flash_cb.isChecked()))
-            s.setValue(f"{self._SETTINGS_PREFIX}/scale",
-                       int(self.scale_spin.value()))
-            s.setValue(f"{self._SETTINGS_PREFIX}/sort_ascending",
-                       bool(self.sort_ascending))
+            p = self._SETTINGS_PREFIX
+            s.setValue(f"{p}/auto_zoom", bool(self.auto_zoom_cb.isChecked()))
+            s.setValue(f"{p}/scale_mode", self._scale_mode())
+            s.setValue(f"{p}/enable_flash", bool(self.enable_flash_cb.isChecked()))
+            s.setValue(f"{p}/lock_navigation", bool(self.lock_nav_cb.isChecked()))
+            s.setValue(f"{p}/track_visited", bool(self.track_visited_cb.isChecked()))
+            s.setValue(f"{p}/measurements",
+                       bool(self.show_measurements_cb.isChecked()))
+            s.setValue(f"{p}/scale", int(self.scale_spin.value()))
+            s.setValue(f"{p}/sort_ascending", bool(self.sort_ascending))
         except Exception:
             pass
 
@@ -2032,38 +1868,34 @@ class FeatureNavEdDockWidget(QDockWidget):
             return bool(v)
 
         def _i(key, default):
-            v = s.value(f"{self._SETTINGS_PREFIX}/{key}", default)
             try:
-                return int(v)
+                return int(s.value(f"{self._SETTINGS_PREFIX}/{key}", default))
             except (TypeError, ValueError):
                 return default
 
-        self.auto_zoom_cb.blockSignals(True)
-        self.auto_zoom_cb.setChecked(_b("auto_zoom", True))
-        self.auto_zoom_cb.blockSignals(False)
+        for checkbox, key, default in ((self.auto_zoom_cb, "auto_zoom", True),
+                                       (self.enable_flash_cb, "enable_flash", False),
+                                       (self.lock_nav_cb, "lock_navigation", False),
+                                       (self.track_visited_cb, "track_visited", True),
+                                       (self.show_measurements_cb, "measurements", False)):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(_b(key, default))
+            checkbox.blockSignals(False)
+        self._lock_navigation = self.lock_nav_cb.isChecked()
+        self._update_nav_title()
 
-        self.auto_scale_cb.blockSignals(True)
-        self.auto_scale_cb.setChecked(_b("auto_scale", True))
-        self.auto_scale_cb.blockSignals(False)
-        self._update_scale_controls(self.auto_scale_cb.isChecked())
-
-        self.enable_flash_cb.blockSignals(True)
-        self.enable_flash_cb.setChecked(_b("enable_flash", False))
-        self.enable_flash_cb.blockSignals(False)
+        # 1.0.x stored a Keep/Fixed choice as the "Auto-scale" tick box.
+        mode = s.value(f"{self._SETTINGS_PREFIX}/scale_mode", "")
+        if mode not in ("keep", "fit", "fixed"):
+            mode = "keep" if _b("auto_scale", True) else "fixed"
+        self.scale_mode_combo.blockSignals(True)
+        self.scale_mode_combo.setCurrentIndex(max(0, self.scale_mode_combo.findData(mode)))
+        self.scale_mode_combo.blockSignals(False)
 
         self.scale_spin.blockSignals(True)
         self.scale_spin.setValue(_i("scale", self.scale_spin.value()))
         self.scale_spin.blockSignals(False)
+        self._update_scale_controls()
 
         self.sort_ascending = _b("sort_ascending", True)
-        if self.sort_ascending:
-            self.sort_order_btn.setIcon(
-                QgsApplication.getThemeIcon('/mActionArrowUp.svg')
-            )
-            self.sort_order_btn.setToolTip("Ascending \u2014 click to toggle")
-        else:
-            self.sort_order_btn.setIcon(
-                QgsApplication.getThemeIcon('/mActionArrowDown.svg')
-            )
-            self.sort_order_btn.setToolTip("Descending \u2014 click to toggle")
-
+        self._update_sort_button()

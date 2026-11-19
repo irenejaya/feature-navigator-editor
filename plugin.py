@@ -7,7 +7,12 @@ Registers the dock widget and creates toolbar/menu entries.
 
 import os
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QAction, QDockWidget
+from qgis.PyQt.QtWidgets import QDockWidget
+
+try:
+    from qgis.PyQt.QtWidgets import QAction
+except ImportError:  # Qt6 moved QAction to QtGui
+    from qgis.PyQt.QtGui import QAction
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsApplication
 
@@ -84,6 +89,12 @@ class FeatureNavEdPlugin:
     def unload(self):
         """Unload the plugin - called when plugin is unloaded."""
         if self.dock_widget:
+            # Disconnect from project/canvas/layer signals first so nothing
+            # calls into the widget after it is deleted (plugin reload safety).
+            try:
+                self.dock_widget.cleanup()
+            except Exception:
+                pass
             self.iface.removeDockWidget(self.dock_widget)
             self.dock_widget.deleteLater()
             self.dock_widget = None
