@@ -62,6 +62,9 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 - Remembered per layer and saved with the project; the layer's own form, attribute table and identify results are not affected
 - A "Showing 12 of 40 fields · Change" line under the form reminds you that some fields are hidden
 
+### Help
+- Click the **book** button (next to the wrench) for a help window: one tab per mode (Overview, Browsing, Editing one feature, Multi-edit, Lock navigation), each with a picture of the panel marked with numbers and an explanation of every numbered button
+
 ### Query Builder & Find
 - **Query Builder** filters the layer so you only navigate matching features; click again to clear
 - **Find** jumps to the next/previous feature with a given field value (with autocomplete), without filtering
@@ -118,9 +121,13 @@ featurenaved/
 ├── review.py            # Visited tracking and the progress strip
 ├── measurements.py      # Area / perimeter / length
 ├── find_bar.py          # Find bar
+├── help_content.py      # Help text (numbered items per page)
+├── help_dialog.py       # Help window
+├── help/                # Help pictures (made by scripts/make_help_images.py)
 ├── compat.py            # Qt5/Qt6 and QGIS-version compatibility
 ├── utils.py             # Small shared helpers
 ├── tests/               # pytest suite (headless QGIS)
+├── scripts/             # make_help_images.py: regenerates the help pictures
 ├── metadata.txt         # QGIS plugin metadata
 ├── icon.svg             # Plugin icon
 ├── LICENSE
@@ -144,6 +151,11 @@ python3 -m pytest tests
 
 On Windows, run the same command from the **OSGeo4W Shell** (install pytest there first
 with `python -m pip install pytest`).
+
+**Help pictures.** After changing the panel's buttons, regenerate the pictures with
+`python3 scripts/make_help_images.py` (same QGIS Python as the tests). The numbers in the
+pictures follow the item order in `help_content.py`; a test fails if an item no longer
+matches a visible button.
 
 GitHub Actions runs the suite on every push and pull request against the official
 QGIS Docker images: 3.34, the current LTR, and the latest release (QGIS 4 / Qt6)

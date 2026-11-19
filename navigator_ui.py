@@ -362,5 +362,9 @@ class NavigatorUiMixin:
         self.settings_btn.setMenu(menu)
         row.addWidget(self.settings_btn)
 
+        self.help_btn = tool_button(
+            '/mActionHelpContents.svg', "Help: what each button does")
+        row.addWidget(self.help_btn)
+
         row.addStretch()
         self._main_layout.addLayout(row)

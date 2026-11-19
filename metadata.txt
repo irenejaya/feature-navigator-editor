@@ -15,6 +15,7 @@ about=FeatureNavEd is a dockable panel that lets you navigate and edit features 
     <b>Editing Toolbar</b> — Toggle editing, save, undo, redo and revert the current feature on the navigated layer, whichever layer is active in the Layers panel.
     <b>Always in Sync</b> — Features deleted, added, undone, saved or rolled back anywhere in QGIS are reflected in the navigation list.
     <b>Field Organizer</b> — Hide and reorder fields (per layer, saved with the project) to keep long forms short.
+    <b>Help</b> — A help window with a numbered picture and explanation for every button, per mode.
     <b>Query Builder</b> — Filter the layer and navigate only the matching features.
     <b>Find</b> — Search for features by field value with an autocomplete dropdown, without filtering the navigation list.
     <b>Auto-zoom</b> — Keep the scale, fit the whole feature, or use a fixed scale when navigating; area/perimeter/length shown under the form.
@@ -54,6 +55,7 @@ changelog=
         * Fixed: values typed in the form are included when saving from the QGIS toolbar
         * Fixed: changing the sort keeps the current feature instead of jumping to the first one; sort field is remembered per layer
         * Fixed: plugin unload/reload no longer leaves signal connections to a deleted panel
+        * New: Help (book button next to Settings) - a window with numbered pictures and explanations for every button: Overview, Browsing, Editing one feature, Multi-edit, Lock navigation
         * Code split into modules, with a pytest suite running in headless QGIS and GitHub Actions CI
         * Removed: filter bar (duplicated the Query Builder), Pick from map (selecting on the map does the same), Open attribute table, Go back to last viewed feature
     1.0.8 - Shortcuts (Alt+Left/Right/Home/End/P/N) now work globally in QGIS regardless of which panel or layer has focus

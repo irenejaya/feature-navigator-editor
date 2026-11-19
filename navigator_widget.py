@@ -113,6 +113,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._field_order = []             # user's field order (empty = layer's)
         self._field_counts = (0, 0)        # (shown, total) for the hint
         self._content_mode = 'placeholder'
+        self._help_dialog = None
 
         # Structural layer changes (delete/add/commit/rollback) are coalesced
         # and processed once control returns to the event loop.
@@ -211,6 +212,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._fields_menu.aboutToHide.connect(self._update_fields_indicator)
         self._field_organizer.changed.connect(self._on_organizer_changed)
         self._fields_hint.linkActivated.connect(self._on_fields_hint_link)
+        self.help_btn.clicked.connect(self._show_help)
 
         self.first_btn.clicked.connect(self._go_first)
         self.prev_btn.clicked.connect(self._go_prev)
@@ -249,6 +251,10 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._disconnect_layer()
         self._layer = None
         self._layer_id = None
+        if self._help_dialog is not None:
+            self._help_dialog.close()
+            self._help_dialog.deleteLater()
+            self._help_dialog = None
         for signal, slot in ((self._layer_removed_signal, self._on_layer_will_be_removed),
                              (self.iface.mapCanvas().scaleChanged, self._on_canvas_scale_changed)):
             try:
@@ -1170,6 +1176,14 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                 grey(f"Showing {shown} of {total} fields") +
                 " · <a href='organize'>Change</a>")
         self._fields_hint.setVisible(show_hint)
+
+    def _show_help(self, *args):
+        from .help_dialog import HelpDialog
+        if self._help_dialog is None:
+            self._help_dialog = HelpDialog(self.iface.mainWindow())
+        self._help_dialog.show()
+        self._help_dialog.raise_()
+        self._help_dialog.activateWindow()
 
     def _on_fields_hint_link(self, link):
         if link == 'organize':
