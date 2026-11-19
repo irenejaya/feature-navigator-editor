@@ -84,6 +84,12 @@ class FeatureNavEdPlugin:
     def unload(self):
         """Unload the plugin - called when plugin is unloaded."""
         if self.dock_widget:
+            # Disconnect from project/canvas/layer signals first so nothing
+            # calls into the widget after it is deleted (plugin reload safety).
+            try:
+                self.dock_widget.cleanup()
+            except Exception:
+                pass
             self.iface.removeDockWidget(self.dock_widget)
             self.dock_widget.deleteLater()
             self.dock_widget = None

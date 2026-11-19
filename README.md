@@ -14,17 +14,39 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 - Reload/sync button to quickly switch to the active layer
 
 ### Feature Navigation
-- Step through features with **First**, **Previous**, **Next**, and **Last** buttons
-- **Pick from map** — click a feature directly on the canvas to jump to it (like the Identify tool)
-- Sort features by any attribute field, ascending or descending
+- Step through features with **First**, **Previous**, **Next**, and **Last** buttons (or `Alt+←/→/Home/End`)
+- Sort features by any attribute field, ascending or descending — the current feature stays put when you change the sort, and the sort field is remembered per layer
 - **Sort field value** — displays the current feature's sort field value at the top for quick reference
-- Each navigated feature is automatically **selected**, **zoomed to**, and **flashed** on the map canvas
+- Each navigated feature is automatically **selected** and **zoomed to** (flash is optional)
+- Selecting a feature on the map jumps the navigator to it; clearing the selection shows a **Return to feature N** link, and Next/Previous continue from where you were
 - Feature counter shows current position (e.g. `3 / 150`)
+
+### Lock Navigation
+- Turn on **Settings → Lock navigation** to keep the navigator on its feature while you click, select or edit other things on the map
+- The locked feature is outlined in orange on the canvas, so you always know which feature the panel shows
+- Navigation buttons, Find and Delete keep working; multi-edit is disabled while locked
 
 ### Native Attribute Form
 - Displays the native QGIS attribute form — identical to the built-in form you see when identifying features
-- Scrollable for layers with many attributes
-- Supports inline editing when the layer is in edit mode — changes are saved when you navigate to the next feature
+- Supports inline editing when the layer is in edit mode — values go into the edit buffer when you move to another feature, save, undo or stop editing (also when saving from the main QGIS toolbar)
+
+### Multi-Edit
+- Select 2 or more features on a layer in edit mode to set shared values in one go
+- Uses the layer's own editor widgets (value maps, spin boxes, dates…); fields that differ show **Mixed values**
+- Editing a field ticks it; only ticked fields are written, and **nothing is written until you click Apply** — changing or refining the selection keeps your pending values instead of applying them
+- One Apply = one undo step; primary-key, unique and read-only fields are locked
+- Fits narrow panels: long field names are shortened instead of forcing a horizontal scrollbar
+
+### Editing Toolbar
+- **Toggle editing**, **Save edits**, **Undo** and **Redo** for the navigated layer — no need to make it the active layer first
+
+### Always in Sync
+- Deleting the current feature — with the panel's Delete button, the `Del` key or from the attribute table — removes it from the list and moves to the next feature
+- Features added, undone, saved or rolled back anywhere in QGIS are picked up automatically
+
+### Query Builder & Find
+- **Query Builder** filters the layer so you only navigate matching features; click again to clear
+- **Find** jumps to the next/previous feature with a given field value (with autocomplete), without filtering
 
 ### Auto-zoom & Scale Control
 - **Auto-zoom** — centres the map on the current feature when navigating
@@ -54,9 +76,10 @@ Copy the `featurenaved` folder into your QGIS plugins directory:
 1. Click the **FeatureNavEd** button in the toolbar (or **Plugins** > **FeatureNavEd**)
 2. Select a vector layer from the dropdown, or drag one from the Layers panel
 3. Choose a field to sort by, and toggle ascending/descending with the arrow button
-4. Use the navigation buttons to step through features, or click the **Pick** button and click a feature on the map
-5. Toggle **Auto-zoom** to centre on features, and **Auto-scale** to lock/unlock the map scale
-6. To edit attributes: toggle the layer into **Edit Mode**, make changes in the form, and navigate — edits save automatically
+4. Use the navigation buttons to step through features, or select a feature on the map to jump to it
+5. Turn on **Settings → Lock navigation** when you want to click around the map without losing your place
+6. To edit: click the **pencil** in the panel toolbar, change values in the form and move on — use **Save edits** to write them to the layer
+7. To edit several features at once: select them (navigation unlocked), change the fields you want, then click **Apply**
 
 ---
 
