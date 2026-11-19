@@ -6,7 +6,7 @@ import html
 import os
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QPixmap
+from qgis.PyQt.QtGui import QGuiApplication, QPixmap
 from qgis.PyQt.QtWidgets import (
     QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QScrollArea, QTabWidget,
     QVBoxLayout, QWidget,
@@ -17,6 +17,7 @@ from .help_content import PAGES
 
 HELP_DIR = os.path.join(os.path.dirname(__file__), "help")
 PICTURE_SCALE = 2.0     # pictures are made at 2x so they stay sharp on HiDPI
+TEXT_WIDTH = 380        # room for the numbered explanations next to a picture
 
 _MARKER_COLOR = "#dc322f"
 
@@ -56,7 +57,7 @@ class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("FeatureNavEd Help")
-        self.resize(900, 760)
+        self._widest_picture = 0
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -68,6 +69,24 @@ class HelpDialog(QDialog):
         buttons.rejected.connect(self.close)
         layout.addWidget(buttons)
 
+        # Wide enough for the widest picture (Lock navigation, with the
+        # Settings menu and map beside the panel) plus its text, but never
+        # bigger than the screen.
+        width, height = self.preferred_size()
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, int(available.width() * 0.95))
+            height = min(height, int(available.height() * 0.9))
+        self.resize(width, height)
+
+    def preferred_size(self):
+        """Window size that shows every page without sideways scrolling."""
+        # page margins + picture/text spacing + scrollbar, tab frame and
+        # dialog margins
+        chrome = 2 * 12 + 18 + 60
+        return self._widest_picture + TEXT_WIDTH + chrome, 780
+
     def _build_page(self, page):
         body = QWidget()
         row = QHBoxLayout(body)
@@ -78,6 +97,8 @@ class HelpDialog(QDialog):
         pixmap = QPixmap(picture_path(page["id"]))
         if not pixmap.isNull():
             pixmap.setDevicePixelRatio(PICTURE_SCALE)
+            self._widest_picture = max(self._widest_picture,
+                                       int(pixmap.width() / PICTURE_SCALE))
             picture = QLabel()
             picture.setPixmap(pixmap)
             picture.setObjectName(f"help_picture_{page['id']}")
