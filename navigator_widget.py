@@ -102,6 +102,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self._current_layer_id = None
         self._layer_positions = {}
         self._history = []          # list of (layer_id, fid)
+        self._forward_history = []    # list of (layer_id, fid) for forward navigation
         self._navigating_back = False
         self._multi_edit_mode = False        # True when ≥2 features selected + layer editable
         self._passive_multi_indicator = False # True when ≥2 selected but layer NOT editable
@@ -241,6 +242,15 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.back_btn.setAutoRaise(True)
         self.back_btn.setEnabled(False)
         toolbar_row.addWidget(self.back_btn)
+
+        self.forward_btn = QToolButton()
+        self.forward_btn.setIcon(
+            QgsApplication.getThemeIcon('/mActionRedo.svg')
+        )
+        self.forward_btn.setToolTip("Go forward to next viewed feature")
+        self.forward_btn.setAutoRaise(True)
+        self.forward_btn.setEnabled(False)
+        toolbar_row.addWidget(self.forward_btn)
 
         # --- Advanced Options dropdown ---
         self.advanced_btn = QToolButton()
@@ -589,6 +599,7 @@ class FeatureNavEdDockWidget(QDockWidget):
         self.search_field_combo.currentIndexChanged.connect(self._populate_search_values)
         self.attr_table_btn.clicked.connect(self._open_attribute_table)
         self.back_btn.clicked.connect(self._go_back)
+        self.forward_btn.clicked.connect(self._go_forward)
         self.filter_expression.expressionChanged.connect(self._on_filter_changed)
         self.selected_only_cb.toggled.connect(lambda *_: self._reload_features())
         self.first_btn.clicked.connect(self._go_first)
@@ -661,8 +672,10 @@ class FeatureNavEdDockWidget(QDockWidget):
         """
         # Drop history and saved positions for the removed layer.
         self._history = [h for h in self._history if h[0] != layer_id]
+        self._forward_history = [h for h in self._forward_history if h[0] != layer_id]
         self._layer_positions.pop(layer_id, None)
         self.back_btn.setEnabled(bool(self._history))
+        self.forward_btn.setEnabled(bool(self._forward_history))
 
         if layer_id != self._current_layer_id:
             return
@@ -844,13 +857,13 @@ class FeatureNavEdDockWidget(QDockWidget):
 
         try:
             entries.sort(
-                key=lambda x: (x[1] is None, x[1]),
+                key=lambda x: (x[1] is not None, x[1]),
                 reverse=not self.sort_ascending
             )
         except TypeError:
             entries.sort(
                 key=lambda x: (
-                    x[1] is None,
+                    x[1] is not None,
                     str(x[1]) if x[1] is not None else ''
                 ),
                 reverse=not self.sort_ascending
@@ -953,8 +966,22 @@ class FeatureNavEdDockWidget(QDockWidget):
             self._navigate_to_current()
 
     def _on_filter_changed(self, *args):
-        """Reload features when the filter expression changes."""
+        """Reload features when the filter expression changes.
+
+        Also hides the 'Selected only' checkbox and lock button while a filter
+        expression is active — combining both filters is not useful and
+        confusing, so we remove that option when a filter is set.
+        """
         expr = self.filter_expression.expression()
+        has_filter = bool(expr and expr.strip())
+        # Show/hide the "Selected only" row based on whether a filter is active.
+        self.selected_only_cb.setVisible(not has_filter)
+        self.lock_selection_btn.setVisible(not has_filter)
+        if has_filter and self.selected_only_cb.isChecked():
+            # Silently uncheck so the filter operates on all features.
+            self.selected_only_cb.blockSignals(True)
+            self.selected_only_cb.setChecked(False)
+            self.selected_only_cb.blockSignals(False)
         if not expr:
             self._reload_features()
             return
@@ -1084,12 +1111,22 @@ class FeatureNavEdDockWidget(QDockWidget):
         if self._history and self._history[-1] == entry:
             return
         self._history.append(entry)
+        # Branching from here — discard any forward history.
+        self._forward_history.clear()
         self.back_btn.setEnabled(True)
+        self.forward_btn.setEnabled(False)
 
     def _go_back(self):
         """Navigate back to the previously viewed feature."""
         if not self._history:
             return
+
+        # Save current position to forward stack before navigating back.
+        if self.current_index >= 0 and self.feature_ids and self._current_layer_id:
+            fwd_entry = (self._current_layer_id, self.feature_ids[self.current_index])
+            if not self._forward_history or self._forward_history[-1] != fwd_entry:
+                self._forward_history.append(fwd_entry)
+                self.forward_btn.setEnabled(True)
 
         layer_id, fid = self._history.pop()
         self.back_btn.setEnabled(bool(self._history))
@@ -1106,6 +1143,37 @@ class FeatureNavEdDockWidget(QDockWidget):
             self.layer_combo.setLayer(target_layer)
             # _on_layer_changed → _reload_features populates feature_ids
             # but skips auto-navigate because _navigating_back is True
+
+        if fid in self.feature_ids:
+            self.current_index = self.feature_ids.index(fid)
+            self._navigate_to_current()
+        self._navigating_back = False
+
+    def _go_forward(self):
+        """Navigate forward to the next viewed feature (reverse of go-back)."""
+        if not self._forward_history:
+            return
+
+        # Save current position to back stack before navigating forward.
+        if self.current_index >= 0 and self.feature_ids and self._current_layer_id:
+            entry = (self._current_layer_id, self.feature_ids[self.current_index])
+            if not self._history or self._history[-1] != entry:
+                self._history.append(entry)
+                self.back_btn.setEnabled(True)
+
+        layer_id, fid = self._forward_history.pop()
+        self.forward_btn.setEnabled(bool(self._forward_history))
+
+        target_layer = QgsProject.instance().mapLayer(layer_id)
+        if not isinstance(target_layer, QgsVectorLayer):
+            # Layer no longer exists — keep popping forward
+            if self._forward_history:
+                self._go_forward()
+            return
+
+        self._navigating_back = True
+        if self.layer_combo.currentLayer() != target_layer:
+            self.layer_combo.setLayer(target_layer)
 
         if fid in self.feature_ids:
             self.current_index = self.feature_ids.index(fid)
