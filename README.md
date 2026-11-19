@@ -44,6 +44,13 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
 - Deleting the current feature — with the panel's Delete button, the `Del` key or from the attribute table — removes it from the list and moves to the next feature
 - Features added, undone, saved or rolled back anywhere in QGIS are picked up automatically
 
+### Field Organizer
+- Click the **eye** button to choose which fields the panel shows — handy for layers with dozens of fields when you only need a few
+- Filter the list by name, and use **Show all** / **Hide all** on the filtered fields (e.g. filter `DEPTH`, then Hide all)
+- Applies to both the single-feature form and multi-edit; a hidden field is never written by multi-edit
+- Remembered per layer and saved with the project; the layer's own form, attribute table and identify results are not affected
+- A "Showing 12 of 40 fields · Change" line under the form reminds you that some fields are hidden
+
 ### Query Builder & Find
 - **Query Builder** filters the layer so you only navigate matching features; click again to clear
 - **Find** jumps to the next/previous feature with a given field value (with autocomplete), without filtering
@@ -80,6 +87,7 @@ Copy the `featurenaved` folder into your QGIS plugins directory:
 5. Turn on **Settings → Lock navigation** when you want to click around the map without losing your place
 6. To edit: click the **pencil** in the panel toolbar, change values in the form and move on — use **Save edits** to write them to the layer
 7. To edit several features at once: select them (navigation unlocked), change the fields you want, then click **Apply**
+8. Too many fields? Click the **eye** button and untick the ones you don't need
 
 ---
 
@@ -89,12 +97,39 @@ Copy the `featurenaved` folder into your QGIS plugins directory:
 featurenaved/
 ├── __init__.py          # Plugin entry point
 ├── plugin.py            # Main plugin class (toolbar, menu, dock registration)
-├── navigator_widget.py  # Dock widget with all UI and navigation logic
+├── navigator_widget.py  # Dock widget: navigation, selection sync, lock, list sync, editing
+├── navigator_ui.py      # Builds the dock's widgets
+├── multi_edit.py        # Multi-edit panel (explicit Apply)
+├── field_organizer.py   # Field organizer popup + hiding fields in the native form
+├── find_bar.py          # Find bar
+├── compat.py            # Qt5/Qt6 and QGIS-version compatibility
+├── utils.py             # Small shared helpers
+├── tests/               # pytest suite (headless QGIS)
 ├── metadata.txt         # QGIS plugin metadata
 ├── icon.svg             # Plugin icon
 ├── LICENSE
 └── README.md
 ```
+
+---
+
+## Development & Tests
+
+The `tests/` folder holds a pytest suite that runs the plugin inside a real, headless QGIS
+(no window opens). It covers navigation, lock navigation, multi-edit, the field organizer,
+keeping the list in sync with the layer, the editing toolbar and plugin load/unload.
+Tests use a throw-away settings folder, so they never touch your own QGIS settings.
+
+```bash
+# Linux (Ubuntu 24.04): sudo apt install python3-qgis qgis-providers python3-pytest
+python3 -m pytest tests
+```
+
+On Windows, run the same command from the **OSGeo4W Shell** (install pytest there first
+with `python -m pip install pytest`).
+
+GitHub Actions runs the suite on every push and pull request
+(`.github/workflows/tests.yml`, QGIS 3.34).
 
 ---
 
