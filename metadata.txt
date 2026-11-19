@@ -45,7 +45,7 @@ changelog=
         * New: review progress - visited features are remembered (saved with the project), shown as a green dot, a clickable progress strip and "Visited n / N", with a Next unvisited button
         * New: stable order - the list only re-sorts when you ask; deletes, undo, new features and edits keep everything in place, and a re-sort button appears when sort values change
         * New: scale dropdown - Keep scale / Fit feature / Fixed scale (replaces the Auto-scale tick box; your setting carries over)
-        * New: measurements under the form - area, perimeter, length, vertices or X/Y, using the project's ellipsoid and units
+        * New: measurements under the form - area and perimeter (length for lines, X/Y for points), using the project's ellipsoid and units
         * New: Revert this feature - discard the unsaved changes of only the feature on screen (a feature added this session is removed); one undo step
         * Undo also reverts a value you have just typed; saving a newly added feature keeps it on screen under its new id
         * Multi-edit rebuilt: nothing is applied until you click Apply (changing the selection or cancelling no longer writes values), pending values survive refining the selection, one undo step per Apply, read-only/primary-key fields are locked, and the form fits narrow panels without horizontal scrolling

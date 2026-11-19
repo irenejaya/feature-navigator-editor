@@ -352,7 +352,7 @@ class NavigatorUiMixin:
         menu_layout.addWidget(self.track_visited_cb)
         self.show_measurements_cb = QCheckBox("Show measurements")
         self.show_measurements_cb.setToolTip(
-            "Area, perimeter or length and vertex count under the form")
+            "Area and perimeter (length for lines) under the form")
         menu_layout.addWidget(self.show_measurements_cb)
         action = QWidgetAction(menu)
         action.setDefaultWidget(container)

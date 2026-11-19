@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 """Scale modes (keep / fit / fixed) and the measurements line."""
 
+import re
+
 from qgis.core import QgsGeometry, QgsProject, QgsSettings, QgsVectorLayer, QgsFeature
 
 from featurenaved.measurements import describe_geometry
 from helpers import pump
+
+
+def digits(text):
+    return re.sub(r"\D", "", text)
 
 
 def set_mode(dock, mode):
@@ -75,8 +81,10 @@ def test_measurements_for_polygons(dock, parcels_gpkg):
     pump()
     text = dock._measure_label.text()
     assert dock._measure_label.isVisible()
-    assert "Area 1,600.00 m²" in text and "Perimeter 160.00 m" in text
-    assert "5 vertices" in text
+    area, perimeter = text.split(" \u00b7 ")
+    # Thousands/decimal separators follow the locale, so compare the digits.
+    assert area.startswith("Area ") and area.endswith("m²") and digits(area) == "160000"
+    assert perimeter.startswith("Perimeter ") and digits(perimeter) == "16000"
     dock.show_measurements_cb.setChecked(False)
     pump()
     assert not dock._measure_label.isVisible()
@@ -86,7 +94,7 @@ def test_measurements_for_lines_and_points(make_layer):
     line = QgsVectorLayer("LineString?crs=EPSG:7855", "lines", "memory")
     QgsProject.instance().addMapLayer(line)
     text = describe_geometry(line, QgsGeometry.fromWkt("LINESTRING(0 0, 30 40, 30 50)"))
-    assert text == "Length 60.00 m · 3 vertices"
+    assert text == "Length 60.00 m"
     points = make_layer(1)
     text = describe_geometry(points, QgsGeometry.fromWkt("POINT(12.5 3)"))
     assert text == "X 12.50 · Y 3.00"

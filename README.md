@@ -71,7 +71,7 @@ A QGIS plugin for navigating and editing vector layer features one by one — li
   - **Keep scale** — centre on the feature without changing the zoom
   - **Fit feature** — zoom so the whole feature fits, with a margin
   - **Fixed scale** — centre at the scale you type (e.g. `1:500`)
-- **Measurements** under the form: area and perimeter (polygons), length (lines), vertex count, or X/Y (points), using the project's ellipsoid and units — like the Identify tool's *Derived* section. Turn off with **Settings → Show measurements**
+- **Measurements** under the form: area and perimeter (polygons), length (lines) or X/Y (points), using the project's ellipsoid and units — like the Identify tool's *Derived* section. Turn off with **Settings → Show measurements**
 
 ---
 
@@ -116,7 +116,7 @@ featurenaved/
 ├── multi_edit.py        # Multi-edit panel (explicit Apply)
 ├── field_organizer.py   # Field organizer popup + hiding/reordering fields in the native form
 ├── review.py            # Visited tracking and the progress strip
-├── measurements.py      # Area / perimeter / length / vertices
+├── measurements.py      # Area / perimeter / length
 ├── find_bar.py          # Find bar
 ├── compat.py            # Qt5/Qt6 and QGIS-version compatibility
 ├── utils.py             # Small shared helpers

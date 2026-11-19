@@ -60,8 +60,11 @@ def _same_geometry(a, b):
     ga, gb = a.geometry(), b.geometry()
     if ga.isNull() or gb.isNull():
         return ga.isNull() and gb.isNull()
+    # Exact equality: same type, vertices and order. isExactlyEqual()
+    # replaces equals() from QGIS 4.2.
+    exact = getattr(ga, 'isExactlyEqual', None) or ga.equals
     try:
-        return ga.equals(gb)        # exact: same type, vertices and order
+        return exact(gb)
     except Exception:
         return ga.asWkt() == gb.asWkt()
 
