@@ -77,3 +77,27 @@ def test_pictures_can_be_regenerated(tmp_path):
         env=env, capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(os.listdir(tmp_path)) == sorted(f"{p['id']}.png" for p in PAGES)
+
+
+def test_window_is_wide_enough_for_the_lock_page():
+    """Regression: the Lock navigation picture was cut off at 900 px."""
+    dialog = HelpDialog()
+    try:
+        lock = QPixmap(picture_path("lock"))
+        picture_width = int(lock.width() / 2)
+        width, _ = dialog.preferred_size()
+        assert width >= picture_width + 300 + 60
+        dialog.resize(width, 780)
+        dialog.tabs.setCurrentIndex(4)
+        dialog.show()
+        pump()
+        scroll = dialog.tabs.currentWidget()
+        assert not scroll.horizontalScrollBar().isVisible()
+        # never larger than the screen it opens on
+        from qgis.PyQt.QtGui import QGuiApplication
+        fresh = HelpDialog()
+        available = QGuiApplication.primaryScreen().availableGeometry()
+        assert fresh.width() <= available.width()
+        fresh.close()
+    finally:
+        dialog.close()
