@@ -20,7 +20,7 @@ about=FeatureNavEd is a dockable panel that lets you navigate and edit features 
     <b>Find</b> — Search for features by field value with an autocomplete dropdown, without filtering the navigation list.
     <b>Auto-zoom</b> — Keep the scale, fit the whole feature, or use a fixed scale when navigating; optional area/perimeter under the form.
 
-version=1.1.0
+version=2.0.0
 author=Irene Jaya
 email=irenejaya1@gmail.com
 tracker=https://github.com/irenejaya/feature-navigator-editor/issues
@@ -38,7 +38,7 @@ hasProcessingProvider=no
 server=False
 
 changelog=
-    1.1.0 - Stability and editing workflow overhaul
+    2.0.0 - Major update: stability, editing workflow, review tools and help
         * New: Lock navigation (Settings menu) - the navigator keeps its feature while you click around the map; the locked feature is outlined. Multi-edit is disabled while locked
         * New: editing toolbar for the navigated layer - toggle editing, save edits, undo, redo
         * New: "Return to feature N" link when the selection is cleared, and Next/Previous resume from the last position
