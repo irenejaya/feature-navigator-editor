@@ -58,6 +58,17 @@ jobs:
 
       - name: Get the checker
         run: |
+          # The checker imports these PyQt6 modules; the QGIS image may lack some.
+          missing=""
+          for pair in QtQuickWidgets:python3-pyqt6.qtquick QtSvg:python3-pyqt6.qtsvg Qsci:python3-pyqt6.qsci; do
+            module=${pair%%:*}; package=${pair#*:}
+            python3 -c "from PyQt6 import $module" 2>/dev/null || missing="$missing $package"
+          done
+          if [ -n "$missing" ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -o Acquire::Retries=3
+            apt-get install -y --no-install-recommends -o Acquire::Retries=3 $missing
+          fi
           python3 -c "import tokenize_rt" 2>/dev/null \
             || python3 -m pip install --break-system-packages tokenize-rt \
             || { apt-get update && apt-get install -y --no-install-recommends python3-tokenize-rt; }
