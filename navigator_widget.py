@@ -289,6 +289,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             ('beforeCommitChanges', self._on_before_commit_changes),
             ('committedFeaturesAdded', self._on_committed_features_added),
             ('beforeModifiedCheck', self._on_before_commit),
+            ('layerModified', self._update_toolbar_state),
         ]
         for name, slot in slots:
             signal = getattr(layer, name, None)
@@ -1471,7 +1472,12 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self.toggle_edit_btn.blockSignals(True)
         self.toggle_edit_btn.setChecked(editable)
         self.toggle_edit_btn.blockSignals(False)
-        self.save_edits_btn.setEnabled(editable)
+        # Like QGIS's own Save button: only when there is something to save.
+        # (Ask the edit buffer: layer.isModified() would push half-typed
+        # form values into the layer on every refresh.)
+        buffer = layer.editBuffer() if editable else None
+        unsaved = buffer is not None and (buffer.isModified() or self._form_dirty)
+        self.save_edits_btn.setEnabled(unsaved)
         can_undo = can_redo = False
         if editable:
             stack = layer.undoStack()
