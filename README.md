@@ -157,6 +157,12 @@ with `python -m pip install pytest`).
 pictures follow the item order in `help_content.py`; a test fails if an item no longer
 matches a visible button.
 
+GitHub Actions also runs the two checks plugins.qgis.org runs on an upload: QGIS's
+Qt6 compatibility checker (`pyqt5_to_pyqt6.py --dry_run`, in the QGIS 4 image) and the
+bandit security scan. Build the upload zip with
+`git archive --prefix=featurenaved/ -o featurenaved.zip HEAD`, which leaves out the tests and
+scripts.
+
 GitHub Actions runs the suite on every push and pull request against the official
 QGIS Docker images: 3.34, the current LTR, and the latest release (QGIS 4 / Qt6)
 (`.github/workflows/tests.yml`).

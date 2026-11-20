@@ -117,15 +117,9 @@ def organizable_fields(layer):
         return entries
     fields = layer.fields()
     for idx in range(fields.count()):
-        try:
-            if layer.editorWidgetSetup(idx).type() == 'Hidden':
-                continue    # never shown in a form anyway
-        except Exception:
-            pass
-        try:
-            icon = fields.iconForField(idx)
-        except Exception:
-            icon = None
+        if layer.editorWidgetSetup(idx).type() == 'Hidden':
+            continue    # never shown in a form anyway
+        icon = fields.iconForField(idx)
         entries.append((fields.at(idx).name(), layer.attributeDisplayName(idx), icon))
     return entries
 

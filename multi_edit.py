@@ -14,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
-from qgis.core import QgsFeature, QgsVectorLayerUtils
+from qgis.core import QgsFeature, QgsFieldConstraints, QgsVectorLayerUtils
 from qgis.gui import QgsAttributeEditorContext, QgsGui
 
 from .compat import NULL, RICH_TEXT, SCROLL_OFF, SP_EXPANDING, qenum
@@ -251,46 +251,25 @@ class MultiEditPanel(QWidget):
         """Return (editable, reason) for multi-editing field ``idx``."""
         if idx in pk_indices:
             return False, "Primary key — can't be set on several features"
-        try:
-            if not QgsVectorLayerUtils.fieldIsEditable(
-                    layer, idx, QgsFeature(layer.fields())):
-                return False, "Read-only field"
-        except Exception:
-            try:
-                if layer.editFormConfig().readOnly(idx):
-                    return False, "Read-only field"
-            except Exception:
-                pass
-        try:
-            from qgis.core import QgsFieldConstraints
-            unique = qenum(QgsFieldConstraints, 'Constraint', 'ConstraintUnique')
-            if layer.fields().at(idx).constraints().constraints() & unique:
-                return False, "Unique field — can't share one value"
-        except Exception:
-            pass
+        if not QgsVectorLayerUtils.fieldIsEditable(layer, idx, QgsFeature(layer.fields())):
+            return False, "Read-only field"
+        unique = qenum(QgsFieldConstraints, 'Constraint', 'ConstraintUnique')
+        if layer.fields().at(idx).constraints().constraints() & unique:
+            return False, "Unique field — can't share one value"
         return True, ""
 
     def _build_rows(self, layer):
         self._destroy_rows()
-        try:
-            pk_indices = set(layer.primaryKeyAttributes())
-        except Exception:
-            pk_indices = set()
+        pk_indices = set(layer.primaryKeyAttributes())
         context = QgsAttributeEditorContext()
-        try:
-            tools = self.iface.vectorLayerTools()
-            if tools is not None:
-                context.setVectorLayerTools(tools)
-        except Exception:
-            pass
+        tools = self.iface.vectorLayerTools()
+        if tools is not None:
+            context.setVectorLayerTools(tools)
 
         fields = layer.fields()
         for idx in range(fields.count()):
-            try:
-                if layer.editorWidgetSetup(idx).type() == 'Hidden':
-                    continue
-            except Exception:
-                pass
+            if layer.editorWidgetSetup(idx).type() == 'Hidden':
+                continue
             row = _Row()
             row.idx = idx
             row.field_name = fields.at(idx).name()
@@ -347,10 +326,7 @@ class MultiEditPanel(QWidget):
         try:
             wrapper = QgsGui.editorWidgetRegistry().create(layer, idx, None, self._body)
             if wrapper is not None:
-                try:
-                    wrapper.setContext(context)
-                except Exception:
-                    pass
+                wrapper.setContext(context)
                 widget = wrapper.widget()
         except Exception:
             wrapper = None
@@ -376,7 +352,7 @@ class MultiEditPanel(QWidget):
                 try:
                     signal.connect(handler)
                     return
-                except Exception:
+                except TypeError:       # signature doesn't fit: try the next one
                     continue
         if row.line_edit is not None:
             row.line_edit.textEdited.connect(handler)
@@ -491,12 +467,9 @@ class MultiEditPanel(QWidget):
     @staticmethod
     def _set_editor_enabled(row, enabled):
         if row.wrapper is not None:
-            try:
-                row.wrapper.setEnabled(enabled)
-                return
-            except Exception:
-                pass
-        row.widget.setEnabled(enabled)
+            row.wrapper.setEnabled(enabled)
+        else:
+            row.widget.setEnabled(enabled)
 
     @staticmethod
     def _set_wrapper_value(wrapper, value):
@@ -509,10 +482,7 @@ class MultiEditPanel(QWidget):
 
     def _row_value(self, row):
         if row.wrapper is not None:
-            try:
-                return row.wrapper.value()
-            except Exception:
-                pass
+            return row.wrapper.value()
         text = row.line_edit.text() if row.line_edit is not None else ''
         if not text:
             return NULL

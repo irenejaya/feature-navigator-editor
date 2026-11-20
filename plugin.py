@@ -14,7 +14,9 @@ try:
 except ImportError:  # Qt6 moved QAction to QtGui
     from qgis.PyQt.QtGui import QAction
 from qgis.PyQt.QtGui import QIcon
-from qgis.core import QgsApplication
+from qgis.core import QgsApplication, QgsMessageLog
+
+from .compat import message_level
 
 # Qt5/Qt6 enum compatibility
 _RightDockArea = getattr(Qt, 'RightDockWidgetArea', None) or Qt.DockWidgetArea.RightDockWidgetArea
@@ -93,8 +95,10 @@ class FeatureNavEdPlugin:
             # calls into the widget after it is deleted (plugin reload safety).
             try:
                 self.dock_widget.cleanup()
-            except Exception:
-                pass
+            except Exception as error:     # never block unloading; log why
+                QgsMessageLog.logMessage(
+                    f"Cleanup on unload failed: {error}", "FeatureNavEd",
+                    message_level('Warning'))
             self.iface.removeDockWidget(self.dock_widget)
             self.dock_widget.deleteLater()
             self.dock_widget = None
