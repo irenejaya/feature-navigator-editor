@@ -19,8 +19,8 @@ PAGES = [
         "title": "Overview",
         "intro": "The buttons along the top work on the layer shown in the panel, "
                  "whichever layer is selected in the Layers panel. Greyed-out "
-                 "buttons are not available yet (for example Save and Undo until "
-                 "you start editing).",
+                 "buttons have nothing to do yet (for example Save and Undo stay "
+                 "grey until you have changed something).",
         "items": [
             ("toggle_edit_btn", "/mActionToggleEditing.svg", "Toggle editing",
              "Start or stop editing the layer. When you stop, QGIS asks whether "
