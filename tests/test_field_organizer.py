@@ -5,7 +5,7 @@ from qgis.PyQt.QtTest import QTest
 from qgis.core import QgsField
 from qgis.PyQt.QtWidgets import QLabel
 
-from featurenaved.compat import CHECKED, UNCHECKED, USER_ROLE
+from featurenaved.compat import CHECKED, UNCHECKED, USER_ROLE, qenum
 from featurenaved.field_organizer import HIDDEN_FIELDS_PROPERTY, load_hidden_fields
 from helpers import field_type, multi_row, pump, type_text, visible_form_fields
 
@@ -191,7 +191,9 @@ def test_designed_forms_keep_their_order(dock, parcels_gpkg):
     layer = parcels_gpkg
     config = layer.editFormConfig()
     form_layout = getattr(getattr(Qgis, 'AttributeFormLayout', None), 'DragAndDrop', None)
-    config.setLayout(form_layout if form_layout is not None else QgsEditFormConfig.TabLayout)
+    if form_layout is None:                       # QGIS < 3.32
+        form_layout = qenum(QgsEditFormConfig, 'EditorLayout', 'TabLayout')
+    config.setLayout(form_layout)
     root = config.invisibleRootContainer()
     root.clear()
     tab = QgsAttributeEditorContainer("Main", root)

@@ -85,9 +85,9 @@ class NavigatorUiMixin:
         layer_layout.setSpacing(4)
         self.layer_combo = QgsMapLayerComboBox()
         try:
-            self.layer_combo.setFilters(Qgis.LayerFilter.VectorLayer)
+            self.layer_combo.setFilters(Qgis.LayerFilter.VectorLayer)   # QGIS >= 3.34
         except AttributeError:
-            self.layer_combo.setFilters(QgsMapLayerProxyModel.VectorLayer)
+            self.layer_combo.setFilters(qenum(QgsMapLayerProxyModel, 'Filter', 'VectorLayer'))
         self.layer_combo.setAllowEmptyLayer(True)
         self.layer_combo.setCurrentIndex(0)
         self.layer_combo.setShowCrs(True)

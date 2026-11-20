@@ -21,7 +21,7 @@ def is_null(value):
     try:
         if NULL is not None and value == NULL:
             return True
-    except Exception:
+    except TypeError:       # some Qt types can't be compared with NULL
         pass
     is_null_method = getattr(value, 'isNull', None)
     if callable(is_null_method):

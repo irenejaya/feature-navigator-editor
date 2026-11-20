@@ -179,14 +179,14 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         data = bytes(mime_data.data('application/qgis.layertreemodeldata'))
         try:
             root = _xml_fromstring(data.decode('utf-8'))
-            for elem in root.iter():
-                layer_id = elem.get('id')
-                if layer_id:
-                    layer = QgsProject.instance().mapLayer(layer_id)
-                    if isinstance(layer, QgsVectorLayer):
-                        return layer
-        except Exception:
-            pass
+        except (SyntaxError, ValueError, UnicodeDecodeError):   # not layer-tree XML
+            return None
+        for elem in root.iter():
+            layer_id = elem.get('id')
+            if layer_id:
+                layer = QgsProject.instance().mapLayer(layer_id)
+                if isinstance(layer, QgsVectorLayer):
+                    return layer
         return None
 
     # =========================================================================
@@ -259,7 +259,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                              (self.iface.mapCanvas().scaleChanged, self._on_canvas_scale_changed)):
             try:
                 signal.disconnect(slot)
-            except Exception:
+            except (TypeError, RuntimeError):   # not connected / already deleted
                 pass
 
     # =========================================================================
@@ -294,25 +294,19 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             signal = getattr(layer, name, None)
             if signal is None:
                 continue
-            try:
-                signal.connect(slot)
-                self._layer_connections.append((signal, slot))
-            except Exception:
-                pass
-        try:
-            stack = layer.undoStack()
-            for signal in (stack.canUndoChanged, stack.canRedoChanged):
-                signal.connect(self._update_toolbar_state)
-                self._layer_connections.append((signal, self._update_toolbar_state))
-        except Exception:
-            pass
+            signal.connect(slot)
+            self._layer_connections.append((signal, slot))
+        stack = layer.undoStack()
+        for signal in (stack.canUndoChanged, stack.canRedoChanged):
+            signal.connect(self._update_toolbar_state)
+            self._layer_connections.append((signal, self._update_toolbar_state))
 
     def _disconnect_layer(self):
         connections, self._layer_connections = self._layer_connections, []
         for signal, slot in connections:
             try:
                 signal.disconnect(slot)
-            except Exception:
+            except (TypeError, RuntimeError):   # not connected / layer deleted
                 pass
 
     def _on_layer_changed(self, layer):
@@ -393,12 +387,8 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             self.sort_field_combo.addItem("(Feature ID)", None)
             fields = layer.fields()
             for i, field in enumerate(fields):
-                icon = None
-                try:
-                    icon = fields.iconForField(i)
-                except Exception:
-                    pass
-                if icon is not None and not icon.isNull():
+                icon = fields.iconForField(i)
+                if not icon.isNull():
                     self.sort_field_combo.addItem(icon, field.name(), field.name())
                 else:
                     self.sort_field_combo.addItem(field.name(), field.name())
@@ -761,8 +751,6 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._form_saving = True
         try:
             form.setFeature(feat)
-        except Exception:
-            pass
         finally:
             self._form_saving = False
         if self._hidden_fields:
@@ -910,10 +898,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         canvas.refresh()
 
     def _flash_geometry(self, feature, layer):
-        try:
-            self.iface.mapCanvas().flashGeometries([feature.geometry()], layer.crs())
-        except Exception:
-            pass
+        self.iface.mapCanvas().flashGeometries([feature.geometry()], layer.crs())
 
     def _flash_current(self):
         layer = self._layer
@@ -1075,7 +1060,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             try:
                 highlight.hide()
                 self.iface.mapCanvas().scene().removeItem(highlight)
-            except Exception:
+            except RuntimeError:        # canvas or highlight already deleted
                 pass
 
     # =========================================================================
@@ -1489,12 +1474,9 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self.save_edits_btn.setEnabled(editable)
         can_undo = can_redo = False
         if editable:
-            try:
-                stack = layer.undoStack()
-                can_undo, can_redo = stack.canUndo(), stack.canRedo()
-                can_undo = can_undo or self._form_dirty
-            except Exception:
-                pass
+            stack = layer.undoStack()
+            can_undo = stack.canUndo() or self._form_dirty
+            can_redo = stack.canRedo()
         self.undo_btn.setEnabled(can_undo)
         self.redo_btn.setEnabled(can_redo)
 
@@ -1628,8 +1610,6 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
         self._form_saving = True
         try:
             form.save()
-        except Exception:
-            pass
         finally:
             self._form_saving = False
         self._set_form_dirty(False)
@@ -1656,7 +1636,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             container.hide()
             container.setParent(None)
             container.deleteLater()
-        except Exception:
+        except RuntimeError:            # Qt already deleted it
             pass
 
     def _show_feature_form(self, layer, feature, save_pending=True):
@@ -1675,8 +1655,8 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
                 self._feature_form.setFeature(feature)
                 reused = True
                 self._set_form_dirty(False)
-            except Exception:
-                pass   # fall through to a full rebuild
+            except RuntimeError:        # form was deleted: rebuild it below
+                pass
             finally:
                 self._form_saving = False
             if reused:
@@ -1693,10 +1673,7 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
             if tools is not None:
                 context.setVectorLayerTools(tools)
             form = QgsAttributeForm(layer, feature, context, self)
-            try:
-                form.widgetValueChanged.connect(self._on_form_widget_changed)
-            except Exception:
-                pass
+            form.widgetValueChanged.connect(self._on_form_widget_changed)
             self._set_form_dirty(False)
             mode = form_mode('SingleEditMode')
             if mode is not None:
@@ -1827,37 +1804,27 @@ class FeatureNavEdDockWidget(NavigatorUiMixin, QDockWidget):
 
     def _notify(self, text, level="info", duration=4):
         name = {'info': 'Info', 'success': 'Success', 'warning': 'Warning'}[level]
-        try:
-            self.iface.messageBar().pushMessage(
-                "FeatureNavEd", text, message_level(name), duration)
-        except Exception:
-            pass
+        self.iface.messageBar().pushMessage(
+            "FeatureNavEd", text, message_level(name), duration)
 
     # =========================================================================
     # SETTINGS PERSISTENCE
     # =========================================================================
 
     def _save_settings(self, *args):
-        try:
-            s = QgsSettings()
-            p = self._SETTINGS_PREFIX
-            s.setValue(f"{p}/auto_zoom", bool(self.auto_zoom_cb.isChecked()))
-            s.setValue(f"{p}/scale_mode", self._scale_mode())
-            s.setValue(f"{p}/enable_flash", bool(self.enable_flash_cb.isChecked()))
-            s.setValue(f"{p}/lock_navigation", bool(self.lock_nav_cb.isChecked()))
-            s.setValue(f"{p}/track_visited", bool(self.track_visited_cb.isChecked()))
-            s.setValue(f"{p}/measurements",
-                       bool(self.show_measurements_cb.isChecked()))
-            s.setValue(f"{p}/scale", int(self.scale_spin.value()))
-            s.setValue(f"{p}/sort_ascending", bool(self.sort_ascending))
-        except Exception:
-            pass
+        s = QgsSettings()
+        p = self._SETTINGS_PREFIX
+        s.setValue(f"{p}/auto_zoom", bool(self.auto_zoom_cb.isChecked()))
+        s.setValue(f"{p}/scale_mode", self._scale_mode())
+        s.setValue(f"{p}/enable_flash", bool(self.enable_flash_cb.isChecked()))
+        s.setValue(f"{p}/lock_navigation", bool(self.lock_nav_cb.isChecked()))
+        s.setValue(f"{p}/track_visited", bool(self.track_visited_cb.isChecked()))
+        s.setValue(f"{p}/measurements", bool(self.show_measurements_cb.isChecked()))
+        s.setValue(f"{p}/scale", int(self.scale_spin.value()))
+        s.setValue(f"{p}/sort_ascending", bool(self.sort_ascending))
 
     def _load_settings(self):
-        try:
-            s = QgsSettings()
-        except Exception:
-            return
+        s = QgsSettings()
 
         def _b(key, default):
             v = s.value(f"{self._SETTINGS_PREFIX}/{key}", default)

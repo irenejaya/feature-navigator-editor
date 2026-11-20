@@ -66,5 +66,6 @@ def polygon_wkb_type():
     wkb = getattr(Qgis, 'WkbType', None)
     if wkb is not None and hasattr(wkb, 'Polygon'):
         return wkb.Polygon
-    from qgis.core import QgsWkbTypes
-    return QgsWkbTypes.Polygon
+    from qgis.core import QgsWkbTypes                 # QGIS < 3.30
+    from featurenaved.compat import qenum
+    return qenum(QgsWkbTypes, 'Type', 'Polygon')

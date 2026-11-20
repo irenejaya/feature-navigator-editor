@@ -63,9 +63,9 @@ ALL_DOCK_AREAS = (
 )
 
 try:
-    NO_GEOMETRY = Qgis.FeatureRequestFlag.NoGeometry
+    NO_GEOMETRY = Qgis.FeatureRequestFlag.NoGeometry          # QGIS >= 3.36
 except AttributeError:
-    NO_GEOMETRY = QgsFeatureRequest.NoGeometry
+    NO_GEOMETRY = qenum(QgsFeatureRequest, 'Flag', 'NoGeometry')
 
 
 def message_level(name):

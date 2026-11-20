@@ -133,7 +133,7 @@ def widget_rect(dock, widget):
 def draw_marker(painter, rect, number, bounds, outline):
     if outline:
         painter.setPen(QPen(MARKER, 1.5))
-        painter.setBrush(Qt.NoBrush if hasattr(Qt, 'NoBrush') else Qt.BrushStyle.NoBrush)
+        painter.setBrush(qenum(Qt, 'BrushStyle', 'NoBrush'))
         painter.drawRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
     radius = 8
     if rect.left() < PAD + 24 and rect.width() < 40:
@@ -164,8 +164,7 @@ def render(dock, page, insets=None, crop_height=None):
     out.setDevicePixelRatio(scale)
     out.fill(dock.palette().color(dock.backgroundRole()))
     painter = QPainter(out)
-    painter.setRenderHint(QPainter.Antialiasing if hasattr(QPainter, 'Antialiasing')
-                          else QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(qenum(QPainter, 'RenderHint', 'Antialiasing'))
     painter.drawPixmap(QPoint(PAD, PAD), panel,
                        QRect(0, 0, int(width * scale), int(height * scale)))
     painter.setPen(QPen(QColor(180, 180, 180), 1))
